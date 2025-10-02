@@ -78,7 +78,8 @@ func (wm *WebletManager) loadWeblets() error {
 	}
 
 	for _, w := range weblets {
-		wm.weblets[w.Name] = &w
+		weblet := w // Create a copy to avoid pointer to loop variable
+		wm.weblets[w.Name] = &weblet
 	}
 
 	return nil

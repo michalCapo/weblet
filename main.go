@@ -3,10 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 )
 
 type Weblet struct {
@@ -158,7 +163,16 @@ func (wm *WebletManager) Add(name, url string) error {
 		URL:  url,
 	}
 
-	return wm.saveWeblets()
+	if err := wm.saveWeblets(); err != nil {
+		return err
+	}
+
+	// Create desktop file for GNOME
+	if err := wm.createDesktopFile(name, url); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to create desktop file: %v\n", err)
+	}
+
+	return nil
 }
 
 func (wm *WebletManager) Remove(name string) error {
@@ -173,7 +187,17 @@ func (wm *WebletManager) Remove(name string) error {
 	}
 
 	delete(wm.weblets, name)
-	return wm.saveWeblets()
+
+	if err := wm.saveWeblets(); err != nil {
+		return err
+	}
+
+	// Remove desktop file for GNOME
+	if err := wm.removeDesktopFile(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to remove desktop file: %v\n", err)
+	}
+
+	return nil
 }
 
 func (wm *WebletManager) isProcessRunning(pid int) bool {
@@ -292,6 +316,153 @@ func (wm *WebletManager) stopProcess(pid int) error {
 		return err
 	}
 	return process.Kill()
+}
+
+func (wm *WebletManager) getDesktopFilePath(name string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	desktopDir := filepath.Join(homeDir, ".local", "share", "applications")
+	if err := os.MkdirAll(desktopDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create applications directory: %w", err)
+	}
+
+	return filepath.Join(desktopDir, fmt.Sprintf("weblet-%s.desktop", name)), nil
+}
+
+func (wm *WebletManager) downloadFavicon(webletURL string) (string, error) {
+	parsedURL, err := url.Parse(webletURL)
+	if err != nil {
+		return "", err
+	}
+
+	// Try common favicon locations
+	faviconURLs := []string{
+		fmt.Sprintf("%s://%s/favicon.ico", parsedURL.Scheme, parsedURL.Host),
+		fmt.Sprintf("%s://%s/favicon.png", parsedURL.Scheme, parsedURL.Host),
+	}
+
+	iconDir := filepath.Join(wm.dataDir, "icons")
+	if err := os.MkdirAll(iconDir, 0755); err != nil {
+		return "", err
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	for _, faviconURL := range faviconURLs {
+		resp, err := client.Get(faviconURL)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			// Determine file extension
+			ext := ".ico"
+			if strings.Contains(faviconURL, ".png") {
+				ext = ".png"
+			}
+
+			iconPath := filepath.Join(iconDir, parsedURL.Host+ext)
+			out, err := os.Create(iconPath)
+			if err != nil {
+				continue
+			}
+			defer out.Close()
+
+			_, err = io.Copy(out, resp.Body)
+			if err != nil {
+				os.Remove(iconPath)
+				continue
+			}
+
+			return iconPath, nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to download favicon")
+}
+
+func (wm *WebletManager) createDesktopFile(name, webletURL string) error {
+	desktopFilePath, err := wm.getDesktopFilePath(name)
+	if err != nil {
+		return err
+	}
+
+	// Get the path to the weblet executable
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Try to download favicon
+	iconPath, err := wm.downloadFavicon(webletURL)
+	if err != nil {
+		// Use a default icon if favicon download fails
+		iconPath = "web-browser"
+	}
+
+	// Create desktop file content
+	desktopContent := fmt.Sprintf(`[Desktop Entry]
+Version=1.0
+Type=Application
+Name=%s
+Comment=Weblet for %s
+Exec=%s %s
+Icon=%s
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+StartupWMClass=%s
+`,
+		name,
+		webletURL,
+		execPath,
+		name,
+		iconPath,
+		name,
+	)
+
+	// Write the desktop file
+	if err := os.WriteFile(desktopFilePath, []byte(desktopContent), 0644); err != nil {
+		return fmt.Errorf("failed to write desktop file: %w", err)
+	}
+
+	// Make the desktop file executable
+	if err := os.Chmod(desktopFilePath, 0755); err != nil {
+		return fmt.Errorf("failed to make desktop file executable: %w", err)
+	}
+
+	fmt.Printf("Created desktop file: %s\n", desktopFilePath)
+
+	// Update desktop database to make GNOME pick up the new application
+	exec.Command("update-desktop-database", filepath.Dir(desktopFilePath)).Run()
+
+	return nil
+}
+
+func (wm *WebletManager) removeDesktopFile(name string) error {
+	desktopFilePath, err := wm.getDesktopFilePath(name)
+	if err != nil {
+		return err
+	}
+
+	// Remove the desktop file if it exists
+	if _, err := os.Stat(desktopFilePath); err == nil {
+		if err := os.Remove(desktopFilePath); err != nil {
+			return fmt.Errorf("failed to remove desktop file: %w", err)
+		}
+		fmt.Printf("Removed desktop file: %s\n", desktopFilePath)
+
+		// Update desktop database
+		exec.Command("update-desktop-database", filepath.Dir(desktopFilePath)).Run()
+	}
+
+	return nil
 }
 
 func main() {

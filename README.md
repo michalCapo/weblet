@@ -12,6 +12,7 @@ Weblet allows you to quickly convert any website into a desktop application with
 - 🎯 **Smart Focusing**: Automatically focuses existing windows instead of creating duplicates
 - 💾 **Persistent Storage**: Saves configurations in `~/.weblet/weblets.json`
 - 🐧 **Linux Optimized**: Built for Linux with window manager integration
+- 🖱️ **Desktop Shortcuts**: Automatically creates desktop shortcuts for easy access
 
 ## 🎯 Perfect For
 
@@ -69,9 +70,26 @@ weblet gmail
 weblet remove github
 ```
 
+## Desktop Shortcuts
+
+When you add a weblet, Weblet automatically creates a desktop shortcut that appears in your application launcher (GNOME, KDE, etc.). This allows you to:
+
+- Launch weblets directly from your application menu
+- Pin weblets to your dock or taskbar
+- Use keyboard shortcuts to launch weblets
+- Find weblets in your application search
+
+Desktop shortcuts are created in `~/.local/share/applications/` and include:
+- Application name and description
+- Website favicon (automatically downloaded)
+- Proper categorization in the Network/WebBrowser category
+- Startup notification support
+
+When you remove a weblet, its desktop shortcut is automatically cleaned up.
+
 ## Data Storage
 
-Weblets are stored in `~/.weblet/weblets.json`. The tool automatically creates this directory and file when needed.
+Weblets are stored in `~/.weblet/weblets.json`. The tool automatically creates this directory and file when needed. Favicons are cached in `~/.weblet/icons/` for desktop shortcuts.
 
 ## Requirements
 

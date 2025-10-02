@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -338,12 +339,6 @@ func (wm *WebletManager) downloadFavicon(webletURL string) (string, error) {
 		return "", err
 	}
 
-	// Try common favicon locations
-	faviconURLs := []string{
-		fmt.Sprintf("%s://%s/favicon.ico", parsedURL.Scheme, parsedURL.Host),
-		fmt.Sprintf("%s://%s/favicon.png", parsedURL.Scheme, parsedURL.Host),
-	}
-
 	iconDir := filepath.Join(wm.dataDir, "icons")
 	if err := os.MkdirAll(iconDir, 0755); err != nil {
 		return "", err
@@ -353,38 +348,144 @@ func (wm *WebletManager) downloadFavicon(webletURL string) (string, error) {
 		Timeout: 10 * time.Second,
 	}
 
-	for _, faviconURL := range faviconURLs {
-		resp, err := client.Get(faviconURL)
-		if err != nil {
+	// First, try to parse HTML to find icon links
+	iconURLs := wm.findIconsFromHTML(webletURL, client)
+
+	// Add common favicon locations as fallback
+	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+	iconURLs = append(iconURLs,
+		baseURL+"/apple-touch-icon.png",
+		baseURL+"/apple-touch-icon-precomposed.png",
+		baseURL+"/favicon-32x32.png",
+		baseURL+"/favicon-16x16.png",
+		baseURL+"/favicon-96x96.png",
+		baseURL+"/favicon-128x128.png",
+		baseURL+"/favicon.png",
+		baseURL+"/icon.png",
+		baseURL+"/favicon.ico",
+	)
+
+	// Try each icon URL, prioritizing PNG files
+	for _, iconURL := range iconURLs {
+		// Skip non-PNG files unless it's the last resort
+		if !strings.HasSuffix(strings.ToLower(iconURL), ".png") &&
+			!strings.HasSuffix(strings.ToLower(iconURL), ".ico") {
 			continue
 		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode == http.StatusOK {
-			// Determine file extension
-			ext := ".ico"
-			if strings.Contains(faviconURL, ".png") {
-				ext = ".png"
+		iconPath, err := wm.downloadIconFile(iconURL, parsedURL.Host, client, iconDir)
+		if err == nil && iconPath != "" {
+			// Prefer PNG over ICO
+			if strings.HasSuffix(strings.ToLower(iconPath), ".png") {
+				return iconPath, nil
 			}
-
-			iconPath := filepath.Join(iconDir, parsedURL.Host+ext)
-			out, err := os.Create(iconPath)
-			if err != nil {
-				continue
+			// Store ICO as fallback
+			if strings.HasSuffix(strings.ToLower(iconPath), ".ico") {
+				// Try to find a PNG still, but keep this as backup
+				for _, pngURL := range iconURLs {
+					if strings.HasSuffix(strings.ToLower(pngURL), ".png") {
+						pngPath, pngErr := wm.downloadIconFile(pngURL, parsedURL.Host, client, iconDir)
+						if pngErr == nil && pngPath != "" {
+							return pngPath, nil
+						}
+					}
+				}
+				// No PNG found, use ICO
+				return iconPath, nil
 			}
-			defer out.Close()
-
-			_, err = io.Copy(out, resp.Body)
-			if err != nil {
-				os.Remove(iconPath)
-				continue
-			}
-
-			return iconPath, nil
 		}
 	}
 
-	return "", fmt.Errorf("failed to download favicon")
+	return "", fmt.Errorf("failed to download any icon")
+}
+
+func (wm *WebletManager) findIconsFromHTML(webletURL string, client *http.Client) []string {
+	var iconURLs []string
+
+	resp, err := client.Get(webletURL)
+	if err != nil {
+		return iconURLs
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return iconURLs
+	}
+
+	// Read HTML body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return iconURLs
+	}
+
+	html := string(body)
+
+	// Parse base URL for relative paths
+	parsedURL, _ := url.Parse(webletURL)
+	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+
+	// Find all icon-related link tags
+	patterns := []string{
+		`<link[^>]*rel=["'](?:apple-touch-icon|icon|shortcut icon)["'][^>]*href=["']([^"']+)["'][^>]*>`,
+		`<link[^>]*href=["']([^"']+)["'][^>]*rel=["'](?:apple-touch-icon|icon|shortcut icon)["'][^>]*>`,
+		`<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>`,
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindAllStringSubmatch(html, -1)
+		for _, match := range matches {
+			if len(match) > 1 {
+				iconURL := match[1]
+				// Convert relative URLs to absolute
+				if strings.HasPrefix(iconURL, "//") {
+					iconURL = parsedURL.Scheme + ":" + iconURL
+				} else if strings.HasPrefix(iconURL, "/") {
+					iconURL = baseURL + iconURL
+				} else if !strings.HasPrefix(iconURL, "http") {
+					iconURL = baseURL + "/" + iconURL
+				}
+				iconURLs = append(iconURLs, iconURL)
+			}
+		}
+	}
+
+	return iconURLs
+}
+
+func (wm *WebletManager) downloadIconFile(iconURL, host string, client *http.Client, iconDir string) (string, error) {
+	resp, err := client.Get(iconURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to fetch: status %d", resp.StatusCode)
+	}
+
+	// Determine file extension from URL or content type
+	ext := ".ico"
+	if strings.Contains(strings.ToLower(iconURL), ".png") {
+		ext = ".png"
+	} else if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "png") {
+		ext = ".png"
+	}
+
+	iconPath := filepath.Join(iconDir, host+ext)
+	out, err := os.Create(iconPath)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		os.Remove(iconPath)
+		return "", err
+	}
+
+	return iconPath, nil
 }
 
 func (wm *WebletManager) createDesktopFile(name, webletURL string) error {

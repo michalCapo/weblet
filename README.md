@@ -81,9 +81,19 @@ When you add a weblet, Weblet automatically creates a desktop shortcut that appe
 
 Desktop shortcuts are created in `~/.local/share/applications/` and include:
 - Application name and description
-- Website favicon (automatically downloaded)
+- High-quality website icon (automatically downloaded, prioritizing PNG format)
 - Proper categorization in the Network/WebBrowser category
 - Startup notification support
+
+### Icon Detection
+
+Weblet automatically fetches the best available icon for each web application by:
+1. **HTML Parsing**: Scans the website's HTML for declared icons (`apple-touch-icon`, `favicon`, Open Graph images)
+2. **Common Locations**: Tries standard icon paths (favicon-32x32.png, apple-touch-icon.png, etc.)
+3. **Format Priority**: Prioritizes PNG files over ICO for better quality
+4. **Smart Fallback**: Falls back to standard favicon.ico if no PNG is available
+
+Icons are cached in `~/.weblet/icons/` and reused across launches.
 
 When you remove a weblet, its desktop shortcut is automatically cleaned up.
 

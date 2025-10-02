@@ -15,3 +15,7 @@ go build -ldflags "-X main.version=$VERSION" -o weblet
 
 echo "Built weblet with version: $VERSION"
 
+# Install to system PATH
+sudo mv weblet /usr/bin/weblet
+echo "Installed weblet to /usr/bin/weblet"
+

@@ -259,6 +259,12 @@ func (wm *WebletManager) Run(name string) error {
 		return wm.focusWindow(weblet.PID)
 	}
 
+	// Check if Chrome app window exists for this URL (more reliable than PID tracking)
+	if wm.isChromeAppWindowOpen(weblet.URL) {
+		// Try to find and focus the window by URL
+		return wm.focusWindowByURL(weblet.URL)
+	}
+
 	// Find available browser
 	browser, err := wm.findBrowser()
 	if err != nil {
@@ -267,7 +273,9 @@ func (wm *WebletManager) Run(name string) error {
 
 	// Start new instance
 	cmd := exec.Command(browser, "--app="+weblet.URL)
-	cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start browser: %w", err)
+	}
 
 	weblet.PID = cmd.Process.Pid
 	wm.saveWeblets()
@@ -333,6 +341,58 @@ func (wm *WebletManager) isProcessRunning(pid int) bool {
 	return err == nil
 }
 
+func (wm *WebletManager) isChromeAppWindowOpen(url string) bool {
+	// Check if there's a Chrome app window open for this URL
+	cmd := exec.Command("wmctrl", "-l")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	lines := splitLines(string(output))
+	domain := extractDomain(url)
+
+	// Create a more flexible matching pattern
+	urlPatterns := []string{
+		url,
+		domain,
+		strings.ReplaceAll(domain, ".", " "),   // Replace dots with spaces
+		strings.ReplaceAll(domain, "www.", ""), // Remove www prefix
+	}
+
+	// Add common site name mappings
+	if strings.Contains(domain, "youtube.com") {
+		urlPatterns = append(urlPatterns, "YouTube", "youtube")
+	}
+	if strings.Contains(domain, "gmail.com") {
+		urlPatterns = append(urlPatterns, "Gmail", "gmail")
+	}
+	if strings.Contains(domain, "github.com") {
+		urlPatterns = append(urlPatterns, "GitHub", "github")
+	}
+	if strings.Contains(domain, "teams.microsoft.com") {
+		urlPatterns = append(urlPatterns, "Teams", "teams", "Microsoft Teams")
+	}
+
+	for _, line := range lines {
+		// wmctrl output format: WindowID Desktop PID Machine WindowTitle
+		parts := strings.Fields(line)
+		if len(parts) >= 4 {
+			windowTitle := strings.Join(parts[4:], " ")
+			windowTitleLower := strings.ToLower(windowTitle)
+
+			// Check if window title contains any of our patterns
+			for _, pattern := range urlPatterns {
+				if strings.Contains(windowTitleLower, strings.ToLower(pattern)) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 func (wm *WebletManager) focusWindow(pid int) error {
 	fmt.Printf("Focusing existing window for PID %d...\n", pid)
 
@@ -368,6 +428,105 @@ func (wm *WebletManager) focusWindow(pid int) error {
 	}
 
 	return fmt.Errorf("failed to focus window: %w", lastErr)
+}
+
+func (wm *WebletManager) focusWindowByURL(url string) error {
+	fmt.Printf("Focusing existing window for URL %s...\n", url)
+
+	// Try to find the window ID by URL using wmctrl
+	cmd := exec.Command("wmctrl", "-l")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list windows: %w", err)
+	}
+
+	lines := splitLines(string(output))
+	domain := extractDomain(url)
+
+	// Create a more flexible matching pattern (same as isChromeAppWindowOpen)
+	urlPatterns := []string{
+		url,
+		domain,
+		strings.ReplaceAll(domain, ".", " "),   // Replace dots with spaces
+		strings.ReplaceAll(domain, "www.", ""), // Remove www prefix
+	}
+
+	// Add common site name mappings
+	if strings.Contains(domain, "youtube.com") {
+		urlPatterns = append(urlPatterns, "YouTube", "youtube")
+	}
+	if strings.Contains(domain, "gmail.com") {
+		urlPatterns = append(urlPatterns, "Gmail", "gmail")
+	}
+	if strings.Contains(domain, "github.com") {
+		urlPatterns = append(urlPatterns, "GitHub", "github")
+	}
+	if strings.Contains(domain, "teams.microsoft.com") {
+		urlPatterns = append(urlPatterns, "Teams", "teams", "Microsoft Teams")
+	}
+
+	for _, line := range lines {
+		// wmctrl output format: WindowID Desktop PID Machine WindowTitle
+		parts := strings.Fields(line)
+		if len(parts) >= 4 {
+			windowTitle := strings.Join(parts[4:], " ")
+			windowTitleLower := strings.ToLower(windowTitle)
+
+			// Check if window title contains any of our patterns
+			for _, pattern := range urlPatterns {
+				if strings.Contains(windowTitleLower, strings.ToLower(pattern)) {
+					windowID := parts[0]
+					return wm.focusWindowByID(windowID)
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("no window found for URL %s", url)
+}
+
+func (wm *WebletManager) focusWindowByID(windowID string) error {
+	// Try multiple methods to focus the window
+	methods := []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		{
+			name: "wmctrl -i -a",
+			cmd:  exec.Command("wmctrl", "-i", "-a", windowID),
+		},
+		{
+			name: "xdotool windowactivate",
+			cmd:  exec.Command("xdotool", "windowactivate", windowID),
+		},
+	}
+
+	var lastErr error
+	for _, method := range methods {
+		if err := method.cmd.Run(); err == nil {
+			fmt.Printf("Successfully focused window using %s\n", method.name)
+			return nil
+		} else {
+			lastErr = err
+		}
+	}
+
+	return fmt.Errorf("failed to focus window: %w", lastErr)
+}
+
+func extractDomain(url string) string {
+	// Simple domain extraction - could be improved with proper URL parsing
+	if strings.HasPrefix(url, "https://") {
+		url = url[8:]
+	} else if strings.HasPrefix(url, "http://") {
+		url = url[7:]
+	}
+
+	if idx := strings.Index(url, "/"); idx != -1 {
+		url = url[:idx]
+	}
+
+	return url
 }
 
 func (wm *WebletManager) findWindowByPID(pid int) (string, error) {
@@ -620,6 +779,16 @@ func (wm *WebletManager) createDesktopFile(name, webletURL string) error {
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Check if weblet is in PATH, if so use just "weblet" for better portability
+	// But only if the PATH version is the same as our current executable
+	if pathWeblet, err := exec.LookPath("weblet"); err == nil {
+		// Check if the PATH version is the same as our current executable
+		if pathWeblet == execPath {
+			execPath = "weblet"
+		}
+		// Otherwise, use the absolute path to ensure we use our version
 	}
 
 	// Try to download favicon

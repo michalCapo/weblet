@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,9 +25,14 @@ type Weblet struct {
 	PID  int    `json:"pid,omitempty"`
 }
 
+type BrowserConfig struct {
+	Browser string `json:"browser"`
+}
+
 type WebletManager struct {
-	weblets map[string]*Weblet
-	dataDir string
+	weblets       map[string]*Weblet
+	dataDir       string
+	browserConfig *BrowserConfig
 }
 
 func NewWebletManager() (*WebletManager, error) {
@@ -47,6 +53,10 @@ func NewWebletManager() (*WebletManager, error) {
 
 	if err := wm.loadWeblets(); err != nil {
 		return nil, fmt.Errorf("failed to load weblets: %w", err)
+	}
+
+	if err := wm.loadBrowserConfig(); err != nil {
+		return nil, fmt.Errorf("failed to load browser config: %w", err)
 	}
 
 	return wm, nil
@@ -72,6 +82,36 @@ func (wm *WebletManager) loadWeblets() error {
 	}
 
 	return nil
+}
+
+func (wm *WebletManager) loadBrowserConfig() error {
+	configFile := filepath.Join(wm.dataDir, "weblet.json")
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No config file exists yet, that's okay
+			wm.browserConfig = &BrowserConfig{}
+			return nil
+		}
+		return err
+	}
+
+	wm.browserConfig = &BrowserConfig{}
+	if err := json.Unmarshal(data, wm.browserConfig); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (wm *WebletManager) saveBrowserConfig() error {
+	configFile := filepath.Join(wm.dataDir, "weblet.json")
+	data, err := json.MarshalIndent(wm.browserConfig, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(configFile, data, 0644)
 }
 
 func (wm *WebletManager) saveWeblets() error {
@@ -111,8 +151,8 @@ func (wm *WebletManager) List() {
 	}
 }
 
-func (wm *WebletManager) findBrowser() (string, error) {
-	// Try browsers in order of preference
+func (wm *WebletManager) detectAvailableBrowsers() []string {
+	var available []string
 	browsers := []string{
 		"google-chrome",
 		"chromium",
@@ -121,11 +161,89 @@ func (wm *WebletManager) findBrowser() (string, error) {
 
 	for _, browser := range browsers {
 		if _, err := exec.LookPath(browser); err == nil {
-			return browser, nil
+			available = append(available, browser)
 		}
 	}
 
-	return "", fmt.Errorf("no supported browser found (tried: google-chrome, chromium, chromium-browser)")
+	return available
+}
+
+func (wm *WebletManager) findBrowser() (string, error) {
+	// If browser is already configured, use it
+	if wm.browserConfig != nil && wm.browserConfig.Browser != "" {
+		if _, err := exec.LookPath(wm.browserConfig.Browser); err == nil {
+			return wm.browserConfig.Browser, nil
+		}
+		// Configured browser not found, fall through to detection
+	}
+
+	// Detect available browsers
+	available := wm.detectAvailableBrowsers()
+	if len(available) == 0 {
+		return "", fmt.Errorf("no supported browser found (tried: google-chrome, chromium, chromium-browser)")
+	}
+
+	// If only one browser found, use it
+	if len(available) == 1 {
+		wm.browserConfig.Browser = available[0]
+		wm.saveBrowserConfig()
+		return available[0], nil
+	}
+
+	// Multiple browsers found, need user selection
+	return "", fmt.Errorf("multiple browsers found, please run 'weblet setup' to choose")
+}
+
+func (wm *WebletManager) Setup() error {
+	available := wm.detectAvailableBrowsers()
+	if len(available) == 0 {
+		return fmt.Errorf("no supported browser found (tried: google-chrome, chromium, chromium-browser)")
+	}
+
+	if len(available) == 1 {
+		wm.browserConfig.Browser = available[0]
+		if err := wm.saveBrowserConfig(); err != nil {
+			return fmt.Errorf("failed to save browser config: %w", err)
+		}
+		fmt.Printf("Automatically selected browser: %s\n", available[0])
+		return nil
+	}
+
+	// Multiple browsers found, ask user to choose
+	fmt.Println("Multiple browsers found. Please choose one:")
+	for i, browser := range available {
+		fmt.Printf("  %d. %s\n", i+1, browser)
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("Enter your choice (1-", len(available), "): ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read input: %w", err)
+		}
+
+		input = strings.TrimSpace(input)
+		choice := 0
+		if _, err := fmt.Sscanf(input, "%d", &choice); err != nil {
+			fmt.Println("Invalid input. Please enter a number.")
+			continue
+		}
+
+		if choice < 1 || choice > len(available) {
+			fmt.Printf("Invalid choice. Please enter a number between 1 and %d.\n", len(available))
+			continue
+		}
+
+		selectedBrowser := available[choice-1]
+		wm.browserConfig.Browser = selectedBrowser
+		if err := wm.saveBrowserConfig(); err != nil {
+			return fmt.Errorf("failed to save browser config: %w", err)
+		}
+
+		fmt.Printf("Browser configured: %s\n", selectedBrowser)
+		return nil
+	}
 }
 
 func (wm *WebletManager) Run(name string) error {
@@ -573,6 +691,7 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage:")
 		fmt.Println("  weblet version")
+		fmt.Println("  weblet setup")
 		fmt.Println("  weblet list")
 		fmt.Println("  weblet <name>")
 		fmt.Println("  weblet add <name> <url>")
@@ -592,6 +711,12 @@ func main() {
 	case "version":
 		fmt.Printf("weblet version %s\n", version)
 		return
+
+	case "setup":
+		if err := wm.Setup(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 
 	case "list":
 		wm.List()
@@ -624,6 +749,29 @@ func main() {
 	default:
 		// Run weblet with given name
 		name := command
+
+		// Check if browser setup is needed (first run or no browser configured)
+		if wm.browserConfig == nil || wm.browserConfig.Browser == "" {
+			available := wm.detectAvailableBrowsers()
+			if len(available) == 0 {
+				fmt.Fprintf(os.Stderr, "Error: no supported browser found (tried: google-chrome, chromium, chromium-browser)\n")
+				fmt.Fprintf(os.Stderr, "Please install Google Chrome or Chromium and run 'weblet setup'\n")
+				os.Exit(1)
+			}
+
+			if len(available) > 1 {
+				fmt.Println("Multiple browsers found. Please run 'weblet setup' to choose your preferred browser.")
+				os.Exit(1)
+			}
+
+			// Auto-configure single browser
+			wm.browserConfig.Browser = available[0]
+			if err := wm.saveBrowserConfig(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to save browser config: %v\n", err)
+			}
+			fmt.Printf("Automatically configured browser: %s\n", available[0])
+		}
+
 		if err := wm.Run(name); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

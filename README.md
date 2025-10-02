@@ -41,6 +41,19 @@ mv weblet ~/.local/bin/
 
 ## Usage
 
+### First-time setup
+On first run, weblet will automatically detect available browsers and configure the best option. If multiple browsers are found, you'll be prompted to run the setup command:
+
+```bash
+weblet setup
+```
+
+This will scan for available browsers (`google-chrome`, `chromium`, `chromium-browser`) and either:
+- Automatically select the only available browser, or
+- Present an interactive menu to choose your preferred browser
+
+The browser preference is saved in `~/.weblet/weblet.json` and will be used for all future weblet launches.
+
 ### Check version
 ```bash
 weblet version
@@ -71,6 +84,9 @@ weblet remove <name>
 ## Examples
 
 ```bash
+# First-time setup (if multiple browsers detected)
+weblet setup
+
 # Add a weblet for Gmail
 weblet add gmail https://mail.google.com
 
@@ -116,7 +132,7 @@ When you remove a weblet, its desktop shortcut is automatically cleaned up.
 
 ## Data Storage
 
-Weblets are stored in `~/.weblet/weblets.json`. The tool automatically creates this directory and file when needed. Favicons are cached in `~/.weblet/icons/` for desktop shortcuts.
+Weblets are stored in `~/.weblet/weblets.json`. Browser configuration is saved in `~/.weblet/weblet.json`. The tool automatically creates this directory and files when needed. Favicons are cached in `~/.weblet/icons/` for desktop shortcuts.
 
 ## Versioning
 
@@ -136,7 +152,15 @@ The version is automatically embedded during build using Go's linker flags. If b
 
 ## Requirements
 
-- Google Chrome or Chromium browser (Google Chrome is tried first, then Chromium as fallback)
+- Google Chrome or Chromium browser (automatically detected and configured on first run)
 - Linux (tested on Ubuntu/Debian)
 - `wmctrl` package for window focusing (optional, install with `sudo apt install wmctrl`)
+
+### Browser Support
+Weblet supports the following browsers (detected automatically):
+- `google-chrome` (preferred)
+- `chromium`
+- `chromium-browser`
+
+On first run, if multiple browsers are detected, you'll be prompted to choose your preferred browser via `weblet setup`.
 

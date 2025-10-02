@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// version is set at build time using ldflags
+var version = "dev"
+
 type Weblet struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
@@ -569,6 +572,7 @@ func (wm *WebletManager) removeDesktopFile(name string) error {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage:")
+		fmt.Println("  weblet version")
 		fmt.Println("  weblet list")
 		fmt.Println("  weblet <name>")
 		fmt.Println("  weblet add <name> <url>")
@@ -585,6 +589,10 @@ func main() {
 	command := os.Args[1]
 
 	switch command {
+	case "version":
+		fmt.Printf("weblet version %s\n", version)
+		return
+
 	case "list":
 		wm.List()
 

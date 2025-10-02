@@ -24,11 +24,28 @@ Weblet allows you to quickly convert any website into a desktop application with
 ## Installation
 
 ```bash
-go build -o weblet main.go
+# Build with version information (recommended)
+chmod +x build.sh
+./build.sh
+mv weblet ~/.local/bin/
+
+# Or build manually with version (format: days_since_2024.HHMM)
+DAYS=$(( ( $(date +%s) - $(date -d "2024-01-01" +%s) ) / 86400 ))
+go build -ldflags "-X main.version=${DAYS}.$(date +%H%M)" -o weblet
+mv weblet ~/.local/bin/
+
+# Or build without version (will show "dev")
+go build -o weblet
 mv weblet ~/.local/bin/
 ```
 
 ## Usage
+
+### Check version
+```bash
+weblet version
+```
+Shows the build version in format `days_since_2024.HHMM` (e.g., `639.2212` = 639 days since Jan 1, 2024, built at 22:12). If built without version flags, shows `dev`.
 
 ### List all weblets
 ```bash
@@ -100,6 +117,22 @@ When you remove a weblet, its desktop shortcut is automatically cleaned up.
 ## Data Storage
 
 Weblets are stored in `~/.weblet/weblets.json`. The tool automatically creates this directory and file when needed. Favicons are cached in `~/.weblet/icons/` for desktop shortcuts.
+
+## Versioning
+
+Weblet uses a simplified versioning system based on build date/time:
+
+- **Format**: `<days_since_2024>.<HHMM>`
+- **Example**: `639.2212` means:
+  - `639` = 639 days since January 1, 2024
+  - `2212` = Built at 22:12 (10:12 PM)
+- **Benefits**: 
+  - Short, readable version numbers (7-8 digits)
+  - Easy to determine build age and time
+  - Unique versions for each build
+  - Human-readable format
+
+The version is automatically embedded during build using Go's linker flags. If built without version information, it displays `dev`.
 
 ## Requirements
 

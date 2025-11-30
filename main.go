@@ -905,9 +905,10 @@ func main() {
 		fmt.Println("  weblet version")
 		fmt.Println("  weblet setup")
 		fmt.Println("  weblet list")
-		fmt.Println("  weblet <name>")
-		fmt.Println("  weblet add <name> <url>")
-		fmt.Println("  weblet remove <name>")
+		fmt.Println("  weblet <name>           - Run existing weblet")
+		fmt.Println("  weblet <name> <url>     - Add and run weblet")
+		fmt.Println("  weblet add <name> <url> - Add weblet without running")
+		fmt.Println("  weblet remove <name>    - Remove weblet")
 		os.Exit(1)
 	}
 
@@ -959,8 +960,42 @@ func main() {
 		fmt.Printf("Removed weblet '%s'\n", name)
 
 	default:
-		// Run weblet with given name
+		// Handle: weblet <name> or weblet <name> <url>
 		name := command
+		var url string
+
+		// Check if URL is provided (add and run immediately)
+		if len(os.Args) == 3 {
+			url = os.Args[2]
+
+			// Check if weblet already exists
+			if existingWeblet, exists := wm.weblets[name]; exists {
+				if existingWeblet.URL == url {
+					// Same URL - just run it (idempotent behavior)
+					fmt.Printf("Weblet '%s' already exists with this URL\n", name)
+				} else {
+					// Different URL - update it
+					existingWeblet.URL = url
+					if err := wm.saveWeblets(); err != nil {
+						fmt.Fprintf(os.Stderr, "Error saving weblets: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Printf("Updated weblet '%s' with new URL '%s'\n", name, url)
+				}
+			} else {
+				// Weblet doesn't exist - add it
+				if err := wm.Add(name, url); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Printf("Added weblet '%s' with URL '%s'\n", name, url)
+			}
+		} else if len(os.Args) > 3 {
+			fmt.Println("Usage:")
+			fmt.Println("  weblet <name>           - Run existing weblet")
+			fmt.Println("  weblet <name> <url>     - Add and run weblet")
+			os.Exit(1)
+		}
 
 		// Check if browser setup is needed (first run or no browser configured)
 		if wm.browserConfig == nil || wm.browserConfig.Browser == "" {
@@ -984,6 +1019,7 @@ func main() {
 			fmt.Printf("Automatically configured browser: %s\n", available[0])
 		}
 
+		// Run the weblet
 		if err := wm.Run(name); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

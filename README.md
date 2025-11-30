@@ -75,10 +75,24 @@ weblet <name>
 ```
 This will start the weblet as a Chrome app if it's not running, or focus on it if it's already running.
 
-### Add a new weblet
+### Add and run a weblet (Quick Start)
+```bash
+weblet <name> <url>
+```
+This will add a new weblet and immediately run it. Perfect for quick setup!
+
+**Smart behavior:**
+- If the weblet doesn't exist → adds it and runs it
+- If the weblet exists with the same URL → just runs it (idempotent)
+- If the weblet exists with a different URL → updates the URL and runs it
+
+You can run this command multiple times without errors!
+
+### Add a weblet without running
 ```bash
 weblet add <name> <url>
 ```
+Adds a weblet to your collection without launching it.
 
 ### Remove a weblet
 ```bash
@@ -91,16 +105,30 @@ weblet remove <name>
 # First-time setup (if multiple browsers detected)
 weblet setup
 
-# Add a weblet for Gmail
-weblet add gmail https://mail.google.com
+# Quick start: Add and run Gmail immediately
+weblet gmail https://mail.google.com
 
-# Add a weblet for GitHub
-weblet add github https://github.com
+# Run the same command again - no error! (idempotent)
+weblet gmail https://mail.google.com
+# Output: Weblet 'gmail' already exists with this URL
+
+# Update Gmail URL and run
+weblet gmail https://mail.google.com/mail/u/1
+# Output: Updated weblet 'gmail' with new URL
+
+# Quick start: Add and run GitHub immediately
+weblet github https://github.com
+
+# Or add without running
+weblet add slack https://app.slack.com
 
 # List all weblets
 weblet list
 
-# Run Gmail
+# Run an existing weblet
+weblet slack
+
+# Run again - will focus existing window instead of creating new one
 weblet gmail
 
 # Remove GitHub weblet

@@ -48,9 +48,13 @@ On first run, weblet will automatically detect available browsers and configure 
 weblet setup
 ```
 
-This will scan for available browsers (`google-chrome`, `chromium`, `chromium-browser`) and either:
-- Automatically select the only available browser, or
-- Present an interactive menu to choose your preferred browser
+This will:
+1. **Check for window management tools** (`wmctrl` and `xdotool`)
+   - These are required for the window focusing feature
+   - Warns if missing and provides installation commands
+2. **Scan for available browsers** (`google-chrome`, `chromium`, `chromium-browser`) and either:
+   - Automatically select the only available browser, or
+   - Present an interactive menu to choose your preferred browser
 
 The browser preference is saved in `~/.weblet/weblet.json` and will be used for all future weblet launches.
 
@@ -154,7 +158,10 @@ The version is automatically embedded during build using Go's linker flags. If b
 
 - Google Chrome or Chromium browser (automatically detected and configured on first run)
 - Linux (tested on Ubuntu/Debian)
-- `wmctrl` package for window focusing (optional, install with `sudo apt install wmctrl`)
+- Window management tools for the focusing feature (at least one required):
+  - `wmctrl` (recommended): `sudo apt install wmctrl`
+  - `xdotool` (fallback): `sudo apt install xdotool`
+  - Run `weblet setup` to check if these are installed
 
 ### Browser Support
 Weblet supports the following browsers (detected automatically):

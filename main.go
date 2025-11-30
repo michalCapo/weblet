@@ -196,6 +196,38 @@ func (wm *WebletManager) findBrowser() (string, error) {
 }
 
 func (wm *WebletManager) Setup() error {
+	fmt.Println("=== Weblet Setup ===")
+	fmt.Println()
+
+	// Check for window management tools
+	fmt.Println("Checking window management tools:")
+	wmctrlInstalled := wm.checkTool("wmctrl")
+	xdotoolInstalled := wm.checkTool("xdotool")
+
+	if !wmctrlInstalled && !xdotoolInstalled {
+		fmt.Println("\n⚠️  Warning: Neither wmctrl nor xdotool found!")
+		fmt.Println("   Window focusing feature will not work.")
+		fmt.Println("   Install at least one with:")
+		fmt.Println("   - sudo apt install wmctrl")
+		fmt.Println("   - sudo apt install xdotool")
+		fmt.Println()
+	} else if !wmctrlInstalled {
+		fmt.Println("\n⚠️  Warning: wmctrl not found (xdotool is available)")
+		fmt.Println("   Consider installing wmctrl for better compatibility:")
+		fmt.Println("   - sudo apt install wmctrl")
+		fmt.Println()
+	} else if !xdotoolInstalled {
+		fmt.Println("\n⚠️  Warning: xdotool not found (wmctrl is available)")
+		fmt.Println("   Consider installing xdotool as a fallback option:")
+		fmt.Println("   - sudo apt install xdotool")
+		fmt.Println()
+	} else {
+		fmt.Println("\n✓ All window management tools are installed!")
+		fmt.Println()
+	}
+
+	// Check for browsers
+	fmt.Println("Checking browsers:")
 	available := wm.detectAvailableBrowsers()
 	if len(available) == 0 {
 		return fmt.Errorf("no supported browser found (tried: google-chrome, chromium, chromium-browser)")
@@ -206,19 +238,19 @@ func (wm *WebletManager) Setup() error {
 		if err := wm.saveBrowserConfig(); err != nil {
 			return fmt.Errorf("failed to save browser config: %w", err)
 		}
-		fmt.Printf("Automatically selected browser: %s\n", available[0])
+		fmt.Printf("✓ Automatically selected browser: %s\n", available[0])
 		return nil
 	}
 
 	// Multiple browsers found, ask user to choose
-	fmt.Println("Multiple browsers found. Please choose one:")
+	fmt.Println("\nMultiple browsers found. Please choose one:")
 	for i, browser := range available {
 		fmt.Printf("  %d. %s\n", i+1, browser)
 	}
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("Enter your choice (1-", len(available), "): ")
+		fmt.Print("\nEnter your choice (1-", len(available), "): ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("failed to read input: %w", err)
@@ -242,9 +274,19 @@ func (wm *WebletManager) Setup() error {
 			return fmt.Errorf("failed to save browser config: %w", err)
 		}
 
-		fmt.Printf("Browser configured: %s\n", selectedBrowser)
+		fmt.Printf("\n✓ Browser configured: %s\n", selectedBrowser)
 		return nil
 	}
+}
+
+func (wm *WebletManager) checkTool(tool string) bool {
+	path, err := exec.LookPath(tool)
+	if err != nil {
+		fmt.Printf("  ✗ %s: not found\n", tool)
+		return false
+	}
+	fmt.Printf("  ✓ %s: %s\n", tool, path)
+	return true
 }
 
 func (wm *WebletManager) Run(name string) error {

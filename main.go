@@ -204,15 +204,95 @@ func (wm *WebletManager) Run(name string) error {
 		return fmt.Errorf("weblet '%s' not found", name)
 	}
 
+	// Check if we're already running as a background process
+	isBackground := os.Getenv("WEBLET_BACKGROUND") == "1"
+
 	// Check if webview window with this name already exists
 	if wm.isWebletWindowOpen(name) {
 		// Try to focus the existing window by title
+		if isBackground {
+			// Background process: just exit silently, window already exists
+			return nil
+		}
 		return wm.focusWindowByTitle(name)
 	}
 
-	// Start webview (this will block until window is closed)
-	runWebview(weblet.URL, name)
+	// Lock file to prevent race conditions
+	lockDir := filepath.Join(wm.dataDir, "locks")
+	os.MkdirAll(lockDir, 0755)
+	lockFile := filepath.Join(lockDir, name+".lock")
 
+	if isBackground {
+		// We're the background process - remove lock when done
+		defer os.Remove(lockFile)
+
+		// Double-check window doesn't exist (another process might have created it)
+		if wm.isWebletWindowOpen(name) {
+			return nil
+		}
+
+		// Run the webview
+		runWebview(weblet.URL, name)
+		return nil
+	}
+
+	// Parent process: try to acquire lock atomically before spawning
+	lock, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		// Lock exists - another instance is starting, wait for window and focus
+		fmt.Printf("Weblet '%s' is starting, waiting for window...\n", name)
+		for i := 0; i < 20; i++ {
+			time.Sleep(200 * time.Millisecond)
+			if wm.isWebletWindowOpen(name) {
+				return wm.focusWindowByTitle(name)
+			}
+		}
+		// Timeout - check if lock is stale (older than 10 seconds)
+		if info, err := os.Stat(lockFile); err == nil {
+			if time.Since(info.ModTime()) > 10*time.Second {
+				os.Remove(lockFile) // Stale lock, remove it
+				return wm.Run(name) // Retry
+			}
+		}
+		return fmt.Errorf("timeout waiting for weblet '%s' to start", name)
+	}
+	lock.Close()
+
+	// Fork to background: spawn ourselves with the same arguments
+	executable, err := os.Executable()
+	if err != nil {
+		os.Remove(lockFile)
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	cmd := exec.Command(executable, name)
+	cmd.Env = append(os.Environ(), "WEBLET_BACKGROUND=1")
+
+	// Redirect output to /dev/null but keep display access
+	devNull, err := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+	if err == nil {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+		defer devNull.Close()
+	}
+	cmd.Stdin = nil
+
+	// Start new process group but don't create new session (keep display)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	if err := cmd.Start(); err != nil {
+		os.Remove(lockFile)
+		return fmt.Errorf("failed to start background process: %w", err)
+	}
+
+	pid := cmd.Process.Pid
+
+	// Detach from the child process so it continues after we exit
+	cmd.Process.Release()
+
+	fmt.Printf("Started weblet '%s' in background (PID %d)\n", name, pid)
 	return nil
 }
 
@@ -285,10 +365,10 @@ func (wm *WebletManager) isWebletWindowOpen(name string) bool {
 	nameLower := strings.ToLower(name)
 
 	for _, line := range lines {
-		// wmctrl output format: WindowID Desktop PID Machine WindowTitle
+		// wmctrl output format: WindowID Desktop Machine WindowTitle...
 		parts := strings.Fields(line)
 		if len(parts) >= 4 {
-			windowTitle := strings.Join(parts[4:], " ")
+			windowTitle := strings.Join(parts[3:], " ")
 			windowTitleLower := strings.ToLower(windowTitle)
 
 			// Check if window title matches the weblet name
@@ -315,10 +395,10 @@ func (wm *WebletManager) focusWindowByTitle(title string) error {
 	titleLower := strings.ToLower(title)
 
 	for _, line := range lines {
-		// wmctrl output format: WindowID Desktop PID Machine WindowTitle
+		// wmctrl output format: WindowID Desktop Machine WindowTitle...
 		parts := strings.Fields(line)
 		if len(parts) >= 4 {
-			windowTitle := strings.Join(parts[4:], " ")
+			windowTitle := strings.Join(parts[3:], " ")
 			windowTitleLower := strings.ToLower(windowTitle)
 
 			// Check if window title matches
@@ -589,6 +669,8 @@ func (wm *WebletManager) createDesktopFile(name, webletURL string) error {
 	}
 
 	// Create desktop file content
+	// StartupWMClass must match what we set in view.go (weblet-<name>)
+	wmClass := fmt.Sprintf("weblet-%s", name)
 	desktopContent := fmt.Sprintf(`[Desktop Entry]
 Version=1.0
 Type=Application
@@ -606,7 +688,7 @@ StartupWMClass=%s
 		execPath,
 		name,
 		iconPath,
-		name,
+		wmClass,
 	)
 
 	// Write the desktop file

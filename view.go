@@ -1,10 +1,13 @@
 package main
 
 /*
-#cgo linux pkg-config: gtk+-3.0 webkit2gtk-4.1
+#cgo linux pkg-config: gtk+-3.0 webkit2gtk-4.1 gdk-3.0 gdk-x11-3.0 x11
 #include <gtk/gtk.h>
+#include <gdk/gdk.h>
+#include <gdk/gdkx.h>
 #include <webkit2/webkit2.h>
 #include <stdlib.h>
+#include <string.h>
 
 static GtkWidget *main_window = NULL;
 static WebKitWebView *main_webview = NULL;
@@ -15,7 +18,30 @@ static void on_destroy(GtkWidget *widget, gpointer data) {
     gtk_main_quit();
 }
 
-void weblet_init(const char *title, const char *url, const char *data_dir, int width, int height) {
+// Set WM_CLASS after window is realized
+static void on_realize(GtkWidget *widget, gpointer data) {
+    const char *wm_class = (const char *)data;
+    GdkWindow *gdk_window = gtk_widget_get_window(widget);
+    if (gdk_window != NULL && GDK_IS_X11_WINDOW(gdk_window)) {
+        gdk_x11_window_set_utf8_property(gdk_window, "_GTK_APPLICATION_ID", wm_class);
+        // Set WM_CLASS using Xlib
+        Display *display = GDK_DISPLAY_XDISPLAY(gdk_display_get_default());
+        Window xwindow = GDK_WINDOW_XID(gdk_window);
+        XClassHint *class_hint = XAllocClassHint();
+        if (class_hint) {
+            class_hint->res_name = (char *)wm_class;
+            class_hint->res_class = (char *)wm_class;
+            XSetClassHint(display, xwindow, class_hint);
+            XFree(class_hint);
+        }
+    }
+}
+
+void weblet_init(const char *title, const char *url, const char *data_dir, const char *icon_path, const char *wm_class, int width, int height) {
+    // Set application name for GNOME
+    g_set_prgname(wm_class);
+    g_set_application_name(title);
+
     gtk_init(NULL, NULL);
 
     // Create window
@@ -23,7 +49,27 @@ void weblet_init(const char *title, const char *url, const char *data_dir, int w
     gtk_window_set_title(GTK_WINDOW(main_window), title);
     gtk_window_set_default_size(GTK_WINDOW(main_window), width, height);
     gtk_window_set_position(GTK_WINDOW(main_window), GTK_WIN_POS_CENTER);
+
+    // Set window role (helps with window matching)
+    gtk_window_set_role(GTK_WINDOW(main_window), wm_class);
+
     g_signal_connect(main_window, "destroy", G_CALLBACK(on_destroy), NULL);
+
+    // Connect realize signal to set WM_CLASS after window is mapped
+    char *wm_class_copy = strdup(wm_class);
+    g_signal_connect(main_window, "realize", G_CALLBACK(on_realize), wm_class_copy);
+
+    // Set window icon if provided
+    if (icon_path != NULL && icon_path[0] != '\0') {
+        GError *error = NULL;
+        GdkPixbuf *icon = gdk_pixbuf_new_from_file(icon_path, &error);
+        if (icon != NULL) {
+            gtk_window_set_icon(GTK_WINDOW(main_window), icon);
+            g_object_unref(icon);
+        } else if (error != NULL) {
+            g_error_free(error);
+        }
+    }
 
     // Create WebKitWebsiteDataManager with persistent storage
     WebKitWebsiteDataManager *data_manager = webkit_website_data_manager_new(
@@ -86,7 +132,9 @@ void weblet_quit() {
 import "C"
 
 import (
+	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -97,7 +145,7 @@ import (
 // runWebview opens a webview window with the given URL and title
 // Uses persistent storage for cookies, localStorage, and other web data
 // This function blocks until the window is closed
-func runWebview(url, title string) {
+func runWebview(webletURL, title string) {
 	// Get data directory for this weblet
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -109,16 +157,27 @@ func runWebview(url, title string) {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
-	log.Printf("Opened weblet window: %s (%s)", title, url)
+	// Find icon for this weblet
+	iconPath := findWebletIcon(homeDir, webletURL)
+
+	// WM_CLASS should match StartupWMClass in .desktop file
+	// Format: weblet-<name> to match weblet-<name>.desktop
+	wmClass := fmt.Sprintf("weblet-%s", title)
+
+	log.Printf("Opened weblet window: %s (%s)", title, webletURL)
 	log.Printf("Data directory: %s", dataDir)
 
 	// Convert strings to C strings
 	cTitle := C.CString(title)
-	cURL := C.CString(url)
+	cURL := C.CString(webletURL)
 	cDataDir := C.CString(dataDir)
+	cIconPath := C.CString(iconPath)
+	cWMClass := C.CString(wmClass)
 	defer C.free(unsafe.Pointer(cTitle))
 	defer C.free(unsafe.Pointer(cURL))
 	defer C.free(unsafe.Pointer(cDataDir))
+	defer C.free(unsafe.Pointer(cIconPath))
+	defer C.free(unsafe.Pointer(cWMClass))
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -131,8 +190,32 @@ func runWebview(url, title string) {
 	}()
 
 	// Initialize and run webview with persistent storage
-	C.weblet_init(cTitle, cURL, cDataDir, 1200, 800)
+	C.weblet_init(cTitle, cURL, cDataDir, cIconPath, cWMClass, 1200, 800)
 	C.weblet_run()
 
 	log.Println("Weblet window closed")
+}
+
+// findWebletIcon looks for an icon file for the given URL
+func findWebletIcon(homeDir, webletURL string) string {
+	iconDir := filepath.Join(homeDir, ".weblet", "icons")
+
+	// Parse the URL to get the host
+	parsedURL, err := url.Parse(webletURL)
+	if err != nil {
+		return ""
+	}
+
+	host := parsedURL.Host
+
+	// Try PNG first, then ICO
+	extensions := []string{".png", ".ico"}
+	for _, ext := range extensions {
+		iconPath := filepath.Join(iconDir, host+ext)
+		if _, err := os.Stat(iconPath); err == nil {
+			return iconPath
+		}
+	}
+
+	return ""
 }

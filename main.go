@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -152,54 +151,11 @@ func (wm *WebletManager) List() {
 	}
 }
 
-func (wm *WebletManager) detectAvailableBrowsers() []string {
-	var available []string
-	browsers := []string{
-		"google-chrome",
-		"chromium",
-		"chromium-browser",
-	}
-
-	for _, browser := range browsers {
-		if _, err := exec.LookPath(browser); err == nil {
-			available = append(available, browser)
-		}
-	}
-
-	return available
-}
-
-func (wm *WebletManager) findBrowser() (string, error) {
-	// If browser is already configured, use it
-	if wm.browserConfig != nil && wm.browserConfig.Browser != "" {
-		if _, err := exec.LookPath(wm.browserConfig.Browser); err == nil {
-			return wm.browserConfig.Browser, nil
-		}
-		// Configured browser not found, fall through to detection
-	}
-
-	// Detect available browsers
-	available := wm.detectAvailableBrowsers()
-	if len(available) == 0 {
-		return "", fmt.Errorf("no supported browser found (tried: google-chrome, chromium, chromium-browser)")
-	}
-
-	// If only one browser found, use it
-	if len(available) == 1 {
-		wm.browserConfig.Browser = available[0]
-		wm.saveBrowserConfig()
-		return available[0], nil
-	}
-
-	// Multiple browsers found, need user selection
-	return "", fmt.Errorf("multiple browsers found, please run 'weblet setup' to choose")
-}
-
 func (wm *WebletManager) Setup() error {
 	fmt.Println("=== Weblet Setup ===")
 	fmt.Println()
 
-	// Check for window management tools
+	// Check for window management tools (needed for focusing existing windows)
 	fmt.Println("Checking window management tools:")
 	wmctrlInstalled := wm.checkTool("wmctrl")
 	xdotoolInstalled := wm.checkTool("xdotool")
@@ -226,57 +182,10 @@ func (wm *WebletManager) Setup() error {
 		fmt.Println()
 	}
 
-	// Check for browsers
-	fmt.Println("Checking browsers:")
-	available := wm.detectAvailableBrowsers()
-	if len(available) == 0 {
-		return fmt.Errorf("no supported browser found (tried: google-chrome, chromium, chromium-browser)")
-	}
+	fmt.Println("✓ Weblet uses native webview for displaying web applications.")
+	fmt.Println("  No browser configuration needed.")
 
-	if len(available) == 1 {
-		wm.browserConfig.Browser = available[0]
-		if err := wm.saveBrowserConfig(); err != nil {
-			return fmt.Errorf("failed to save browser config: %w", err)
-		}
-		fmt.Printf("✓ Automatically selected browser: %s\n", available[0])
-		return nil
-	}
-
-	// Multiple browsers found, ask user to choose
-	fmt.Println("\nMultiple browsers found. Please choose one:")
-	for i, browser := range available {
-		fmt.Printf("  %d. %s\n", i+1, browser)
-	}
-
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Print("\nEnter your choice (1-", len(available), "): ")
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("failed to read input: %w", err)
-		}
-
-		input = strings.TrimSpace(input)
-		choice := 0
-		if _, err := fmt.Sscanf(input, "%d", &choice); err != nil {
-			fmt.Println("Invalid input. Please enter a number.")
-			continue
-		}
-
-		if choice < 1 || choice > len(available) {
-			fmt.Printf("Invalid choice. Please enter a number between 1 and %d.\n", len(available))
-			continue
-		}
-
-		selectedBrowser := available[choice-1]
-		wm.browserConfig.Browser = selectedBrowser
-		if err := wm.saveBrowserConfig(); err != nil {
-			return fmt.Errorf("failed to save browser config: %w", err)
-		}
-
-		fmt.Printf("\n✓ Browser configured: %s\n", selectedBrowser)
-		return nil
-	}
+	return nil
 }
 
 func (wm *WebletManager) checkTool(tool string) bool {
@@ -295,34 +204,15 @@ func (wm *WebletManager) Run(name string) error {
 		return fmt.Errorf("weblet '%s' not found", name)
 	}
 
-	// Check if already running
-	if weblet.PID > 0 && wm.isProcessRunning(weblet.PID) {
-		// Focus on the existing window
-		return wm.focusWindow(weblet.PID)
+	// Check if webview window with this name already exists
+	if wm.isWebletWindowOpen(name) {
+		// Try to focus the existing window by title
+		return wm.focusWindowByTitle(name)
 	}
 
-	// Check if Chrome app window exists for this URL (more reliable than PID tracking)
-	if wm.isChromeAppWindowOpen(weblet.URL) {
-		// Try to find and focus the window by URL
-		return wm.focusWindowByURL(weblet.URL)
-	}
+	// Start webview (this will block until window is closed)
+	runWebview(weblet.URL, name)
 
-	// Find available browser
-	browser, err := wm.findBrowser()
-	if err != nil {
-		return err
-	}
-
-	// Start new instance
-	cmd := exec.Command(browser, "--app="+weblet.URL)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start browser: %w", err)
-	}
-
-	weblet.PID = cmd.Process.Pid
-	wm.saveWeblets()
-
-	fmt.Printf("Started weblet '%s' with PID %d using %s\n", name, weblet.PID, browser)
 	return nil
 }
 
@@ -383,8 +273,8 @@ func (wm *WebletManager) isProcessRunning(pid int) bool {
 	return err == nil
 }
 
-func (wm *WebletManager) isChromeAppWindowOpen(url string) bool {
-	// Check if there's a Chrome app window open for this URL
+func (wm *WebletManager) isWebletWindowOpen(name string) bool {
+	// Check if there's a webview window open with this weblet name as title
 	cmd := exec.Command("wmctrl", "-l")
 	output, err := cmd.Output()
 	if err != nil {
@@ -392,29 +282,7 @@ func (wm *WebletManager) isChromeAppWindowOpen(url string) bool {
 	}
 
 	lines := splitLines(string(output))
-	domain := extractDomain(url)
-
-	// Create a more flexible matching pattern
-	urlPatterns := []string{
-		url,
-		domain,
-		strings.ReplaceAll(domain, ".", " "),   // Replace dots with spaces
-		strings.ReplaceAll(domain, "www.", ""), // Remove www prefix
-	}
-
-	// Add common site name mappings
-	if strings.Contains(domain, "youtube.com") {
-		urlPatterns = append(urlPatterns, "YouTube", "youtube")
-	}
-	if strings.Contains(domain, "gmail.com") {
-		urlPatterns = append(urlPatterns, "Gmail", "gmail")
-	}
-	if strings.Contains(domain, "github.com") {
-		urlPatterns = append(urlPatterns, "GitHub", "github")
-	}
-	if strings.Contains(domain, "teams.microsoft.com") {
-		urlPatterns = append(urlPatterns, "Teams", "teams", "Microsoft Teams")
-	}
+	nameLower := strings.ToLower(name)
 
 	for _, line := range lines {
 		// wmctrl output format: WindowID Desktop PID Machine WindowTitle
@@ -423,11 +291,9 @@ func (wm *WebletManager) isChromeAppWindowOpen(url string) bool {
 			windowTitle := strings.Join(parts[4:], " ")
 			windowTitleLower := strings.ToLower(windowTitle)
 
-			// Check if window title contains any of our patterns
-			for _, pattern := range urlPatterns {
-				if strings.Contains(windowTitleLower, strings.ToLower(pattern)) {
-					return true
-				}
+			// Check if window title matches the weblet name
+			if windowTitleLower == nameLower || strings.HasPrefix(windowTitleLower, nameLower+" ") {
+				return true
 			}
 		}
 	}
@@ -435,47 +301,10 @@ func (wm *WebletManager) isChromeAppWindowOpen(url string) bool {
 	return false
 }
 
-func (wm *WebletManager) focusWindow(pid int) error {
-	fmt.Printf("Focusing existing window for PID %d...\n", pid)
+func (wm *WebletManager) focusWindowByTitle(title string) error {
+	fmt.Printf("Focusing existing window: %s\n", title)
 
-	// Try to find the window ID by PID
-	windowID, err := wm.findWindowByPID(pid)
-	if err != nil {
-		return fmt.Errorf("failed to find window for PID %d: %w", pid, err)
-	}
-
-	// Try multiple methods to focus the window
-	methods := []struct {
-		name string
-		cmd  *exec.Cmd
-	}{
-		{
-			name: "wmctrl -i -a",
-			cmd:  exec.Command("wmctrl", "-i", "-a", windowID),
-		},
-		{
-			name: "xdotool windowactivate",
-			cmd:  exec.Command("xdotool", "windowactivate", windowID),
-		},
-	}
-
-	var lastErr error
-	for _, method := range methods {
-		if err := method.cmd.Run(); err == nil {
-			fmt.Printf("Successfully focused window using %s\n", method.name)
-			return nil
-		} else {
-			lastErr = err
-		}
-	}
-
-	return fmt.Errorf("failed to focus window: %w", lastErr)
-}
-
-func (wm *WebletManager) focusWindowByURL(url string) error {
-	fmt.Printf("Focusing existing window for URL %s...\n", url)
-
-	// Try to find the window ID by URL using wmctrl
+	// Try to find and focus the window using wmctrl
 	cmd := exec.Command("wmctrl", "-l")
 	output, err := cmd.Output()
 	if err != nil {
@@ -483,29 +312,7 @@ func (wm *WebletManager) focusWindowByURL(url string) error {
 	}
 
 	lines := splitLines(string(output))
-	domain := extractDomain(url)
-
-	// Create a more flexible matching pattern (same as isChromeAppWindowOpen)
-	urlPatterns := []string{
-		url,
-		domain,
-		strings.ReplaceAll(domain, ".", " "),   // Replace dots with spaces
-		strings.ReplaceAll(domain, "www.", ""), // Remove www prefix
-	}
-
-	// Add common site name mappings
-	if strings.Contains(domain, "youtube.com") {
-		urlPatterns = append(urlPatterns, "YouTube", "youtube")
-	}
-	if strings.Contains(domain, "gmail.com") {
-		urlPatterns = append(urlPatterns, "Gmail", "gmail")
-	}
-	if strings.Contains(domain, "github.com") {
-		urlPatterns = append(urlPatterns, "GitHub", "github")
-	}
-	if strings.Contains(domain, "teams.microsoft.com") {
-		urlPatterns = append(urlPatterns, "Teams", "teams", "Microsoft Teams")
-	}
+	titleLower := strings.ToLower(title)
 
 	for _, line := range lines {
 		// wmctrl output format: WindowID Desktop PID Machine WindowTitle
@@ -514,17 +321,15 @@ func (wm *WebletManager) focusWindowByURL(url string) error {
 			windowTitle := strings.Join(parts[4:], " ")
 			windowTitleLower := strings.ToLower(windowTitle)
 
-			// Check if window title contains any of our patterns
-			for _, pattern := range urlPatterns {
-				if strings.Contains(windowTitleLower, strings.ToLower(pattern)) {
-					windowID := parts[0]
-					return wm.focusWindowByID(windowID)
-				}
+			// Check if window title matches
+			if windowTitleLower == titleLower || strings.HasPrefix(windowTitleLower, titleLower+" ") {
+				windowID := parts[0]
+				return wm.focusWindowByID(windowID)
 			}
 		}
 	}
 
-	return fmt.Errorf("no window found for URL %s", url)
+	return fmt.Errorf("no window found with title: %s", title)
 }
 
 func (wm *WebletManager) focusWindowByID(windowID string) error {
@@ -554,63 +359,6 @@ func (wm *WebletManager) focusWindowByID(windowID string) error {
 	}
 
 	return fmt.Errorf("failed to focus window: %w", lastErr)
-}
-
-func extractDomain(url string) string {
-	// Simple domain extraction - could be improved with proper URL parsing
-	if strings.HasPrefix(url, "https://") {
-		url = url[8:]
-	} else if strings.HasPrefix(url, "http://") {
-		url = url[7:]
-	}
-
-	if idx := strings.Index(url, "/"); idx != -1 {
-		url = url[:idx]
-	}
-
-	return url
-}
-
-func (wm *WebletManager) findWindowByPID(pid int) (string, error) {
-	// Try wmctrl first
-	cmd := exec.Command("wmctrl", "-lp")
-	output, err := cmd.Output()
-	if err == nil {
-		// Parse wmctrl output: WindowID Desktop PID Machine WindowTitle
-		lines := string(output)
-		for _, line := range splitLines(lines) {
-			var windowID string
-			var desktop int
-			var windowPID int
-			_, err := fmt.Sscanf(line, "%s %d %d", &windowID, &desktop, &windowPID)
-			if err == nil && windowPID == pid {
-				return windowID, nil
-			}
-		}
-	}
-
-	// Fallback to xdotool
-	cmd = exec.Command("xdotool", "search", "--pid", fmt.Sprintf("%d", pid))
-	output, err = cmd.Output()
-	if err == nil {
-		lines := splitLines(string(output))
-		if len(lines) > 0 && lines[0] != "" {
-			// Return the first window ID found
-			return lines[0], nil
-		}
-	}
-
-	// Last resort: try xprop with all windows
-	cmd = exec.Command("bash", "-c", fmt.Sprintf("xdotool search --all --name '' | while read wid; do xprop -id $wid _NET_WM_PID | grep -q '%d$' && echo $wid && break; done", pid))
-	output, err = cmd.Output()
-	if err == nil {
-		windowID := string(output)
-		if windowID != "" {
-			return windowID, nil
-		}
-	}
-
-	return "", fmt.Errorf("no window found for PID %d", pid)
 }
 
 func splitLines(s string) []string {
@@ -995,28 +743,6 @@ func main() {
 			fmt.Println("  weblet <name>           - Run existing weblet")
 			fmt.Println("  weblet <name> <url>     - Add and run weblet")
 			os.Exit(1)
-		}
-
-		// Check if browser setup is needed (first run or no browser configured)
-		if wm.browserConfig == nil || wm.browserConfig.Browser == "" {
-			available := wm.detectAvailableBrowsers()
-			if len(available) == 0 {
-				fmt.Fprintf(os.Stderr, "Error: no supported browser found (tried: google-chrome, chromium, chromium-browser)\n")
-				fmt.Fprintf(os.Stderr, "Please install Google Chrome or Chromium and run 'weblet setup'\n")
-				os.Exit(1)
-			}
-
-			if len(available) > 1 {
-				fmt.Println("Multiple browsers found. Please run 'weblet setup' to choose your preferred browser.")
-				os.Exit(1)
-			}
-
-			// Auto-configure single browser
-			wm.browserConfig.Browser = available[0]
-			if err := wm.saveBrowserConfig(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to save browser config: %v\n", err)
-			}
-			fmt.Printf("Automatically configured browser: %s\n", available[0])
 		}
 
 		// Run the weblet

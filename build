@@ -1,0 +1,95 @@
+#!/bin/bash
+# Build script for weblet with version as build date/time
+
+set -e
+
+# Check for required dependencies
+check_dependencies() {
+    echo "Checking dependencies..."
+    
+    # Check for Go
+    if ! command -v go &> /dev/null; then
+        echo "Error: Go is not installed"
+        exit 1
+    fi
+    
+    # Check for webkit2gtk (required for webview)
+    if ! pkg-config --exists webkit2gtk-4.0 2>/dev/null && ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+        echo "Error: webkit2gtk is not installed"
+        echo "Install with: sudo apt install libwebkit2gtk-4.0-dev"
+        exit 1
+    fi
+    
+    echo "✓ All dependencies found"
+}
+
+# Generate simplified version: <days_since_epoch>.<HHMM>
+# Date: Days since Jan 1, 2024 (3-4 digits)
+# Time: HHMM format (4 digits)
+generate_version() {
+    EPOCH_DATE="2024-01-01"
+    CURRENT_DATE=$(date +%Y-%m-%d)
+    DAYS_SINCE_EPOCH=$(( ( $(date -d "$CURRENT_DATE" +%s) - $(date -d "$EPOCH_DATE" +%s) ) / 86400 ))
+    TIME_HHMM=$(date +%H%M)
+    VERSION="${DAYS_SINCE_EPOCH}.${TIME_HHMM}"
+    echo "$VERSION"
+}
+
+# Build the binary
+build() {
+    VERSION=$(generate_version)
+    
+    echo "Building weblet version $VERSION..."
+    
+    # CGO is required for webview
+    CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o weblet
+    
+    echo "✓ Built weblet with version: $VERSION"
+}
+
+# Install to system PATH
+install_system() {
+    if [ ! -f weblet ]; then
+        echo "Error: weblet binary not found. Run build first."
+        exit 1
+    fi
+    
+    echo "Installing weblet to /usr/bin/weblet..."
+    sudo cp weblet /usr/bin/weblet
+    echo "✓ Installed weblet to /usr/bin/weblet"
+}
+
+# Show usage
+usage() {
+    echo "Usage: $0 [command]"
+    echo ""
+    echo "Commands:"
+    echo "  build    - Build the weblet binary (default)"
+    echo "  install  - Build and install to /usr/bin"
+    echo "  check    - Check dependencies only"
+    echo "  help     - Show this help"
+}
+
+# Main
+case "${1:-build}" in
+    build)
+        check_dependencies
+        build
+        ;;
+    install)
+        check_dependencies
+        build
+        install_system
+        ;;
+    check)
+        check_dependencies
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    *)
+        echo "Unknown command: $1"
+        usage
+        exit 1
+        ;;
+esac

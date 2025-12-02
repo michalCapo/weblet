@@ -9,14 +9,15 @@ Weblet allows you to quickly convert any website into a desktop application with
 - 🚀 **Quick Setup**: Add web apps with a single command
 - 🖥️ **Desktop Integration**: Runs websites as Chrome app windows
 - 📋 **Process Management**: Tracks and manages running instances
-- 🎯 **Smart Focusing**: Automatically focuses existing windows instead of creating duplicates
+- 🎯 **Smart Focusing**: Run the same weblet multiple times—it focuses the existing window instead of creating duplicates
 - 💾 **Persistent Storage**: Saves configurations in `~/.weblet/weblets.json`
 - 🐧 **Linux Optimized**: Built for Linux with window manager integration
 - 🖱️ **Desktop Shortcuts**: Automatically creates desktop shortcuts for easy access
 
 ## 🎯 Perfect For
 
-- Converting web-based tools (Gmail, GitHub, Slack, etc.) into desktop apps
+- Converting web-based tools (Gmail, GitHub, Slack, Discord, etc.) into desktop apps
+- WebRTC-heavy apps (Discord, Zoom, Teams) that need full audio device support
 - Creating a unified workspace with multiple web applications
 - Developers who prefer CLI-based app management
 - Users wanting lightweight alternatives to Electron apps
@@ -73,7 +74,13 @@ weblet list
 ```bash
 weblet <name>
 ```
-This will start the weblet as a Chrome app if it's not running, or focus on it if it's already running.
+Starts the weblet if it's not running, or focuses the existing window if it's already running.
+
+**Example:**
+```bash
+weblet discord          # Opens Discord weblet
+weblet discord          # Focuses the existing window (no duplicate!)
+```
 
 ### Add and run a weblet (Quick Start)
 ```bash
@@ -93,6 +100,14 @@ You can run this command multiple times without errors!
 weblet add <name> <url>
 ```
 Adds a weblet to your collection without launching it.
+
+### Toggle native mode (experimental)
+```bash
+weblet native <name>
+```
+Toggles between Chrome mode (default, full audio support) and native webview mode (lighter weight, experimental).
+
+**Note:** Chrome mode is the default and recommended for most apps, especially WebRTC-heavy ones like Discord. Native mode is lighter but may have compatibility issues with some web apps.
 
 ### Remove a weblet
 ```bash
@@ -184,12 +199,18 @@ The version is automatically embedded during build using Go's linker flags. If b
 
 ## Requirements
 
-- Google Chrome or Chromium browser (automatically detected and configured on first run)
-- Linux (tested on Ubuntu/Debian)
-- Window management tools for the focusing feature (at least one required):
-  - `wmctrl` (recommended): `sudo apt install wmctrl`
-  - `xdotool` (fallback): `sudo apt install xdotool`
-  - Run `weblet setup` to check if these are installed
+### Core Requirements
+- **Google Chrome or Chromium** (automatically detected)
+- **Linux** (tested on Ubuntu/Debian with GNOME/KDE)
+
+### Window Management (for focus/reuse feature)
+To prevent duplicate windows when running the same weblet multiple times, install at least one of:
+- `wmctrl` (recommended): `sudo apt install wmctrl`
+- `xdotool` (fallback): `sudo apt install xdotool`
+
+Run `weblet setup` to verify installation.
+
+**Without these tools:** Each `weblet discord` invocation will create a new window instead of focusing the existing one.
 
 ### Browser Support
 Weblet supports the following browsers (detected automatically):
@@ -198,4 +219,41 @@ Weblet supports the following browsers (detected automatically):
 - `chromium-browser`
 
 On first run, if multiple browsers are detected, you'll be prompted to choose your preferred browser via `weblet setup`.
+
+## 🔧 Troubleshooting
+
+### "Running `weblet discord` creates a new window every time"
+**Solution:** Install window management tools to enable the focus feature:
+```bash
+sudo apt install wmctrl
+# or for fallback:
+sudo apt install xdotool
+```
+Then verify installation:
+```bash
+weblet setup
+```
+
+### "Microphone/Camera not working in weblet"
+**Solutions:**
+1. Ensure you're using **Chrome mode** (default for most weblets):
+   ```bash
+   weblet native discord  # First time: switches to native (lighter)
+   weblet native discord  # Second time: switches back to Chrome
+   ```
+2. Grant browser permissions when prompted in the weblet window
+3. Check your system audio/camera settings
+
+### "Some websites say 'Browser not supported'"
+**Solution:** Weblet sets a Chrome user-agent by default. If a site still complains:
+1. Try Chrome mode: Switch weblets to Chrome mode if using native
+2. File a bug report with the website name
+
+## 📝 Data Storage
+
+- **Weblets config**: `~/.weblet/weblets.json`
+- **Chrome data**: `~/.weblet/chrome-data/` (per-weblet isolation)
+- **Native webview data**: `~/.weblet/data/`
+- **Icons**: `~/.weblet/icons/`
+- **Desktop shortcuts**: `~/.local/share/applications/weblet-*.desktop`
 

@@ -37,6 +37,43 @@ static void on_realize(GtkWidget *widget, gpointer data) {
     }
 }
 
+// Handle permission requests (microphone, camera, notifications, etc.)
+static gboolean on_permission_request(WebKitWebView *web_view,
+                                       WebKitPermissionRequest *request,
+                                       gpointer user_data) {
+    // Auto-grant media (microphone/camera) permissions
+    if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
+        g_print("Granting microphone/camera permission\n");
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    // Auto-grant notification permissions
+    if (WEBKIT_IS_NOTIFICATION_PERMISSION_REQUEST(request)) {
+        g_print("Granting notification permission\n");
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    // Auto-grant geolocation permissions
+    if (WEBKIT_IS_GEOLOCATION_PERMISSION_REQUEST(request)) {
+        g_print("Granting geolocation permission\n");
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    // Auto-grant device info permissions (enumerate devices)
+    if (WEBKIT_IS_DEVICE_INFO_PERMISSION_REQUEST(request)) {
+        g_print("Granting device info permission\n");
+        webkit_permission_request_allow(request);
+        return TRUE;
+    }
+
+    // For other permissions, allow by default
+    webkit_permission_request_allow(request);
+    return TRUE;
+}
+
 void weblet_init(const char *title, const char *url, const char *data_dir, const char *icon_path, const char *wm_class, int width, int height) {
     // Set application name for GNOME
     g_set_prgname(wm_class);
@@ -95,15 +132,33 @@ void weblet_init(const char *title, const char *url, const char *data_dir, const
     // Create webview with the context
     main_webview = WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(context));
 
-    // Configure settings
+    // Configure settings for full web app support
     WebKitSettings *settings = webkit_web_view_get_settings(main_webview);
+
+    // Set Chrome user-agent to avoid "Unsupported Browser" on Discord, Teams, etc.
+    webkit_settings_set_user_agent(settings,
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
     webkit_settings_set_enable_javascript(settings, TRUE);
     webkit_settings_set_javascript_can_access_clipboard(settings, TRUE);
-    webkit_settings_set_enable_media_stream(settings, TRUE);
-    webkit_settings_set_enable_mediasource(settings, TRUE);
-    webkit_settings_set_enable_webaudio(settings, TRUE);
+
+    // Audio/Video support
+    webkit_settings_set_enable_media_stream(settings, TRUE);        // Microphone/Camera
+    webkit_settings_set_enable_mediasource(settings, TRUE);         // MSE for video playback
+    webkit_settings_set_enable_webaudio(settings, TRUE);            // Web Audio API
+    webkit_settings_set_enable_media(settings, TRUE);               // HTML5 media elements
+    webkit_settings_set_media_playback_requires_user_gesture(settings, FALSE);  // Allow autoplay
+    webkit_settings_set_enable_encrypted_media(settings, TRUE);     // DRM/encrypted media
+
+    // Hardware acceleration for better media performance
+    webkit_settings_set_hardware_acceleration_policy(settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
+
+    // Other features
     webkit_settings_set_enable_webgl(settings, TRUE);
     webkit_settings_set_enable_developer_extras(settings, FALSE);
+
+    // Connect permission request handler for microphone/camera/notifications
+    g_signal_connect(main_webview, "permission-request", G_CALLBACK(on_permission_request), NULL);
 
     // Add webview to window
     gtk_container_add(GTK_CONTAINER(main_window), GTK_WIDGET(main_webview));

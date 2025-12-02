@@ -19,19 +19,15 @@ import (
 var version = "dev"
 
 type Weblet struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-	PID  int    `json:"pid,omitempty"`
-}
-
-type BrowserConfig struct {
-	Browser string `json:"browser"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	PID       int    `json:"pid,omitempty"`
+	UseChrome bool   `json:"use_chrome,omitempty"` // Use Chrome for WebRTC-heavy apps
 }
 
 type WebletManager struct {
-	weblets       map[string]*Weblet
-	dataDir       string
-	browserConfig *BrowserConfig
+	weblets map[string]*Weblet
+	dataDir string
 }
 
 func NewWebletManager() (*WebletManager, error) {
@@ -52,10 +48,6 @@ func NewWebletManager() (*WebletManager, error) {
 
 	if err := wm.loadWeblets(); err != nil {
 		return nil, fmt.Errorf("failed to load weblets: %w", err)
-	}
-
-	if err := wm.loadBrowserConfig(); err != nil {
-		return nil, fmt.Errorf("failed to load browser config: %w", err)
 	}
 
 	return wm, nil
@@ -82,36 +74,6 @@ func (wm *WebletManager) loadWeblets() error {
 	}
 
 	return nil
-}
-
-func (wm *WebletManager) loadBrowserConfig() error {
-	configFile := filepath.Join(wm.dataDir, "weblet.json")
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No config file exists yet, that's okay
-			wm.browserConfig = &BrowserConfig{}
-			return nil
-		}
-		return err
-	}
-
-	wm.browserConfig = &BrowserConfig{}
-	if err := json.Unmarshal(data, wm.browserConfig); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (wm *WebletManager) saveBrowserConfig() error {
-	configFile := filepath.Join(wm.dataDir, "weblet.json")
-	data, err := json.MarshalIndent(wm.browserConfig, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configFile, data, 0644)
 }
 
 func (wm *WebletManager) saveWeblets() error {
@@ -147,7 +109,11 @@ func (wm *WebletManager) List() {
 				weblet.PID = 0
 			}
 		}
-		fmt.Printf("  %s: %s (%s)\n", name, weblet.URL, status)
+		mode := ""
+		if weblet.UseChrome {
+			mode = " [chrome]"
+		}
+		fmt.Printf("  %s: %s (%s)%s\n", name, weblet.URL, status, mode)
 	}
 }
 
@@ -202,6 +168,11 @@ func (wm *WebletManager) Run(name string) error {
 	weblet, exists := wm.weblets[name]
 	if !exists {
 		return fmt.Errorf("weblet '%s' not found", name)
+	}
+
+	// If weblet uses Chrome, run with Chrome instead of native webview
+	if weblet.UseChrome {
+		return wm.runWithChrome(weblet)
 	}
 
 	// Check if we're already running as a background process
@@ -293,6 +264,77 @@ func (wm *WebletManager) Run(name string) error {
 	cmd.Process.Release()
 
 	fmt.Printf("Started weblet '%s' in background (PID %d)\n", name, pid)
+	return nil
+}
+
+// runWithChrome runs the weblet using Chrome/Chromium in app mode
+// This is needed for WebRTC-heavy apps like Discord that need full audio device support
+func (wm *WebletManager) runWithChrome(weblet *Weblet) error {
+	// Check if Chrome window already exists
+	if wm.isWebletWindowOpen(weblet.Name) {
+		return wm.focusWindowByTitle(weblet.Name)
+	}
+
+	// Find Chrome or Chromium
+	browsers := []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"}
+	var browser string
+	for _, b := range browsers {
+		if _, err := exec.LookPath(b); err == nil {
+			browser = b
+			break
+		}
+	}
+	if browser == "" {
+		return fmt.Errorf("Chrome or Chromium not found. Install with: sudo apt install google-chrome-stable")
+	}
+
+	// Create Chrome user data directory for this weblet
+	userDataDir := filepath.Join(wm.dataDir, "chrome-data", weblet.Name)
+	os.MkdirAll(userDataDir, 0755)
+
+	// Start Chrome in app mode
+	cmd := exec.Command(browser,
+		"--app="+weblet.URL,
+		"--user-data-dir="+userDataDir,
+		"--class=weblet-"+weblet.Name,
+	)
+
+	// Redirect output to null
+	devNull, _ := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+	if devNull != nil {
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+		defer devNull.Close()
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start Chrome: %w", err)
+	}
+
+	cmd.Process.Release()
+	fmt.Printf("Started weblet '%s' with Chrome (WebRTC mode)\n", weblet.Name)
+	return nil
+}
+
+// SetChromeMode enables or disables Chrome mode for a weblet
+func (wm *WebletManager) SetChromeMode(name string, useChrome bool) error {
+	weblet, exists := wm.weblets[name]
+	if !exists {
+		return fmt.Errorf("weblet '%s' not found", name)
+	}
+
+	weblet.UseChrome = useChrome
+	if err := wm.saveWeblets(); err != nil {
+		return err
+	}
+
+	mode := "native webview"
+	if useChrome {
+		mode = "Chrome (WebRTC mode)"
+	}
+	fmt.Printf("Weblet '%s' will now use %s\n", name, mode)
 	return nil
 }
 
@@ -739,6 +781,7 @@ func main() {
 		fmt.Println("  weblet <name> <url>     - Add and run weblet")
 		fmt.Println("  weblet add <name> <url> - Add weblet without running")
 		fmt.Println("  weblet remove <name>    - Remove weblet")
+		fmt.Println("  weblet chrome <name>    - Toggle Chrome mode (for WebRTC/audio)")
 		os.Exit(1)
 	}
 
@@ -788,6 +831,24 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Removed weblet '%s'\n", name)
+
+	case "chrome":
+		if len(os.Args) != 3 {
+			fmt.Println("Usage: weblet chrome <name>")
+			fmt.Println("Toggles Chrome mode for WebRTC-heavy apps (Discord, Meet, etc.)")
+			os.Exit(1)
+		}
+		name := os.Args[2]
+		weblet, exists := wm.weblets[name]
+		if !exists {
+			fmt.Fprintf(os.Stderr, "Error: weblet '%s' not found\n", name)
+			os.Exit(1)
+		}
+		// Toggle Chrome mode
+		if err := wm.SetChromeMode(name, !weblet.UseChrome); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 
 	default:
 		// Handle: weblet <name> or weblet <name> <url>

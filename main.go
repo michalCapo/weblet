@@ -99,21 +99,11 @@ func (wm *WebletManager) List() {
 
 	fmt.Println("Available weblets:")
 	for name, weblet := range wm.weblets {
-		status := "stopped"
-		if weblet.PID > 0 {
-			// Check if process is still running
-			if wm.isProcessRunning(weblet.PID) {
-				status = "running"
-			} else {
-				// Clean up stale PID
-				weblet.PID = 0
-			}
-		}
 		mode := ""
-		if weblet.UseChrome {
-			mode = " [chrome]"
+		if !weblet.UseChrome {
+			mode = " [native]"
 		}
-		fmt.Printf("  %s: %s (%s)%s\n", name, weblet.URL, status, mode)
+		fmt.Printf("  %s: %s%s\n", name, weblet.URL, mode)
 	}
 }
 
@@ -330,11 +320,11 @@ func (wm *WebletManager) SetChromeMode(name string, useChrome bool) error {
 		return err
 	}
 
-	mode := "native webview"
 	if useChrome {
-		mode = "Chrome (WebRTC mode)"
+		fmt.Printf("Weblet '%s' will now use Chrome (default, full audio support)\n", name)
+	} else {
+		fmt.Printf("Weblet '%s' will now use native webview (lighter, no WebRTC audio)\n", name)
 	}
-	fmt.Printf("Weblet '%s' will now use %s\n", name, mode)
 	return nil
 }
 
@@ -344,8 +334,9 @@ func (wm *WebletManager) Add(name, url string) error {
 	}
 
 	wm.weblets[name] = &Weblet{
-		Name: name,
-		URL:  url,
+		Name:      name,
+		URL:       url,
+		UseChrome: true, // Chrome is default for full WebRTC/audio support
 	}
 
 	if err := wm.saveWeblets(); err != nil {
@@ -781,7 +772,7 @@ func main() {
 		fmt.Println("  weblet <name> <url>     - Add and run weblet")
 		fmt.Println("  weblet add <name> <url> - Add weblet without running")
 		fmt.Println("  weblet remove <name>    - Remove weblet")
-		fmt.Println("  weblet chrome <name>    - Toggle Chrome mode (for WebRTC/audio)")
+		fmt.Println("  weblet native <name>    - Toggle native mode (lighter, no WebRTC)")
 		os.Exit(1)
 	}
 
@@ -832,10 +823,10 @@ func main() {
 		}
 		fmt.Printf("Removed weblet '%s'\n", name)
 
-	case "chrome":
+	case "native":
 		if len(os.Args) != 3 {
-			fmt.Println("Usage: weblet chrome <name>")
-			fmt.Println("Toggles Chrome mode for WebRTC-heavy apps (Discord, Meet, etc.)")
+			fmt.Println("Usage: weblet native <name>")
+			fmt.Println("Toggles native webview mode (lighter weight, but no WebRTC audio)")
 			os.Exit(1)
 		}
 		name := os.Args[2]
@@ -844,7 +835,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: weblet '%s' not found\n", name)
 			os.Exit(1)
 		}
-		// Toggle Chrome mode
+		// Toggle native mode (inverse of Chrome mode)
 		if err := wm.SetChromeMode(name, !weblet.UseChrome); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)

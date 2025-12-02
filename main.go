@@ -387,9 +387,30 @@ func (wm *WebletManager) isProcessRunning(pid int) bool {
 }
 
 func (wm *WebletManager) isWebletWindowOpen(name string) bool {
-	// Check if there's a webview window open with this weblet name as title
-	cmd := exec.Command("wmctrl", "-l")
+	// Check by WM_CLASS first (most reliable - works for both native webview and Chrome)
+	// wmctrl -lx output format: WindowID Desktop WM_CLASS Machine WindowTitle...
+	cmd := exec.Command("wmctrl", "-lx")
 	output, err := cmd.Output()
+	if err == nil {
+		lines := splitLines(string(output))
+		targetClass := strings.ToLower("weblet-" + name)
+
+		for _, line := range lines {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				// WM_CLASS is in format "instance.class" (e.g., "weblet-discord.weblet-discord")
+				wmClass := strings.ToLower(parts[2])
+				if wmClass == targetClass || strings.HasPrefix(wmClass, targetClass+".") ||
+					strings.HasSuffix(wmClass, "."+targetClass) || strings.Contains(wmClass, targetClass) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Fallback: check by window title
+	cmd = exec.Command("wmctrl", "-l")
+	output, err = cmd.Output()
 	if err != nil {
 		return false
 	}
@@ -417,9 +438,30 @@ func (wm *WebletManager) isWebletWindowOpen(name string) bool {
 func (wm *WebletManager) focusWindowByTitle(title string) error {
 	fmt.Printf("Focusing existing window: %s\n", title)
 
-	// Try to find and focus the window using wmctrl
-	cmd := exec.Command("wmctrl", "-l")
+	// Try to find window by WM_CLASS first (most reliable)
+	// wmctrl -lx output format: WindowID Desktop WM_CLASS Machine WindowTitle...
+	cmd := exec.Command("wmctrl", "-lx")
 	output, err := cmd.Output()
+	if err == nil {
+		lines := splitLines(string(output))
+		targetClass := strings.ToLower("weblet-" + title)
+
+		for _, line := range lines {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				wmClass := strings.ToLower(parts[2])
+				if wmClass == targetClass || strings.HasPrefix(wmClass, targetClass+".") ||
+					strings.HasSuffix(wmClass, "."+targetClass) || strings.Contains(wmClass, targetClass) {
+					windowID := parts[0]
+					return wm.focusWindowByID(windowID)
+				}
+			}
+		}
+	}
+
+	// Fallback: search by window title
+	cmd = exec.Command("wmctrl", "-l")
+	output, err = cmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to list windows: %w", err)
 	}

@@ -294,7 +294,7 @@ func RunWebview(webletURL, title string) {
 	}
 
 	// Find icon for this weblet
-	iconPath := findWebletIcon(homeDir, webletURL)
+	iconPath := findWebletIcon(homeDir, webletURL, title)
 
 	// WM_CLASS should match StartupWMClass in .desktop file
 	// Format: weblet-<name> to match weblet-<name>.desktop
@@ -343,20 +343,28 @@ func RunWebview(webletURL, title string) {
 	log.Println("Weblet window closed")
 }
 
-// findWebletIcon looks for an icon file for the given URL
-func findWebletIcon(homeDir, webletURL string) string {
+// findWebletIcon looks for an icon file for the given weblet
+func findWebletIcon(homeDir, webletURL, webletName string) string {
 	iconDir := filepath.Join(homeDir, ".weblet", "icons")
 
-	// Parse the URL to get the host
+	// Try PNG first, then ICO, then other formats
+	extensions := []string{".png", ".ico", ".svg", ".jpg"}
+
+	// First, try by weblet name (new naming scheme)
+	for _, ext := range extensions {
+		iconPath := filepath.Join(iconDir, webletName+ext)
+		if _, err := os.Stat(iconPath); err == nil {
+			return iconPath
+		}
+	}
+
+	// Fallback: try by host (old naming scheme for backwards compatibility)
 	parsedURL, err := url.Parse(webletURL)
 	if err != nil {
 		return ""
 	}
 
 	host := parsedURL.Host
-
-	// Try PNG first, then ICO
-	extensions := []string{".png", ".ico"}
 	for _, ext := range extensions {
 		iconPath := filepath.Join(iconDir, host+ext)
 		if _, err := os.Stat(iconPath); err == nil {

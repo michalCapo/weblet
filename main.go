@@ -316,6 +316,30 @@ func (wm *WebletManager) runWithChrome(weblet *Weblet) error {
 	return nil
 }
 
+// Refresh re-downloads the icon and updates the desktop file for a weblet
+func (wm *WebletManager) Refresh(name string) error {
+	weblet, exists := wm.weblets[name]
+	if !exists {
+		return fmt.Errorf("weblet '%s' not found", name)
+	}
+
+	// Remove old icon files for this weblet
+	iconDir := filepath.Join(wm.dataDir, "icons")
+	extensions := []string{".png", ".ico", ".svg", ".jpg"}
+	for _, ext := range extensions {
+		iconPath := filepath.Join(iconDir, name+ext)
+		os.Remove(iconPath) // Ignore errors, file might not exist
+	}
+
+	// Re-create the desktop file (which will re-download the icon)
+	if err := wm.createDesktopFile(name, weblet.URL); err != nil {
+		return fmt.Errorf("failed to refresh weblet: %w", err)
+	}
+
+	fmt.Printf("Refreshed weblet '%s'\n", name)
+	return nil
+}
+
 // SetChromeMode enables or disables Chrome mode for a weblet
 func (wm *WebletManager) SetChromeMode(name string, useChrome bool) error {
 	weblet, exists := wm.weblets[name]
@@ -654,7 +678,7 @@ func (wm *WebletManager) getDesktopFilePath(name string) (string, error) {
 	return filepath.Join(desktopDir, fmt.Sprintf("weblet-%s.desktop", name)), nil
 }
 
-func (wm *WebletManager) downloadFavicon(webletURL string) (string, error) {
+func (wm *WebletManager) downloadFavicon(webletURL, webletName string) (string, error) {
 	parsedURL, err := url.Parse(webletURL)
 	if err != nil {
 		return "", err
@@ -677,6 +701,8 @@ func (wm *WebletManager) downloadFavicon(webletURL string) (string, error) {
 	iconURLs = append(iconURLs,
 		baseURL+"/apple-touch-icon.png",
 		baseURL+"/apple-touch-icon-precomposed.png",
+		baseURL+"/favicon-192x192.png",
+		baseURL+"/favicon-256x256.png",
 		baseURL+"/favicon-32x32.png",
 		baseURL+"/favicon-16x16.png",
 		baseURL+"/favicon-96x96.png",
@@ -686,35 +712,41 @@ func (wm *WebletManager) downloadFavicon(webletURL string) (string, error) {
 		baseURL+"/favicon.ico",
 	)
 
+	// Add icon services as reliable fallbacks (provide proper app icons)
+	domain := parsedURL.Host
+	// Strip www. prefix for cleaner domain matching
+	cleanDomain := strings.TrimPrefix(domain, "www.")
+
+	iconURLs = append(iconURLs,
+		// icon.horse - provides high quality favicons
+		fmt.Sprintf("https://icon.horse/icon/%s", cleanDomain),
+		// Google's favicon service
+		fmt.Sprintf("https://www.google.com/s2/favicons?domain=%s&sz=128", cleanDomain),
+		fmt.Sprintf("https://www.google.com/s2/favicons?domain=%s&sz=64", cleanDomain),
+		// DuckDuckGo's icon service
+		fmt.Sprintf("https://icons.duckduckgo.com/ip3/%s.ico", cleanDomain),
+	)
+
+	var icoFallback string
+
 	// Try each icon URL, prioritizing PNG files
 	for _, iconURL := range iconURLs {
-		// Skip non-PNG files unless it's the last resort
-		if !strings.HasSuffix(strings.ToLower(iconURL), ".png") &&
-			!strings.HasSuffix(strings.ToLower(iconURL), ".ico") {
-			continue
-		}
-
-		iconPath, err := wm.downloadIconFile(iconURL, parsedURL.Host, client, iconDir)
+		iconPath, err := wm.downloadIconFile(iconURL, webletName, client, iconDir)
 		if err == nil && iconPath != "" {
 			// Prefer PNG over ICO
 			if strings.HasSuffix(strings.ToLower(iconPath), ".png") {
 				return iconPath, nil
 			}
 			// Store ICO as fallback
-			if strings.HasSuffix(strings.ToLower(iconPath), ".ico") {
-				// Try to find a PNG still, but keep this as backup
-				for _, pngURL := range iconURLs {
-					if strings.HasSuffix(strings.ToLower(pngURL), ".png") {
-						pngPath, pngErr := wm.downloadIconFile(pngURL, parsedURL.Host, client, iconDir)
-						if pngErr == nil && pngPath != "" {
-							return pngPath, nil
-						}
-					}
-				}
-				// No PNG found, use ICO
-				return iconPath, nil
+			if strings.HasSuffix(strings.ToLower(iconPath), ".ico") && icoFallback == "" {
+				icoFallback = iconPath
 			}
 		}
+	}
+
+	// Use ICO fallback if we have one
+	if icoFallback != "" {
+		return icoFallback, nil
 	}
 
 	return "", fmt.Errorf("failed to download any icon")
@@ -745,36 +777,146 @@ func (wm *WebletManager) findIconsFromHTML(webletURL string, client *http.Client
 	parsedURL, _ := url.Parse(webletURL)
 	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
 
-	// Find all icon-related link tags
+	// Find all icon-related link tags (prioritize larger icons)
+	// Note: We do NOT include og:image as those are social media preview images, not app icons
 	patterns := []string{
-		`<link[^>]*rel=["'](?:apple-touch-icon|icon|shortcut icon)["'][^>]*href=["']([^"']+)["'][^>]*>`,
-		`<link[^>]*href=["']([^"']+)["'][^>]*rel=["'](?:apple-touch-icon|icon|shortcut icon)["'][^>]*>`,
-		`<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>`,
+		// Web app manifest first (contains high-res icons designed for apps)
+		`<link[^>]*rel=["']manifest["'][^>]*href=["']([^"']+)["'][^>]*>`,
+		`<link[^>]*href=["']([^"']+)["'][^>]*rel=["']manifest["'][^>]*>`,
+		// Apple touch icons (usually 180x180 or larger, designed for app icons)
+		`<link[^>]*rel=["']apple-touch-icon(?:-precomposed)?["'][^>]*href=["']([^"']+)["'][^>]*>`,
+		`<link[^>]*href=["']([^"']+)["'][^>]*rel=["']apple-touch-icon(?:-precomposed)?["'][^>]*>`,
+		// Standard icons with sizes attribute (prefer larger)
+		`<link[^>]*rel=["']icon["'][^>]*sizes=["'](?:192x192|256x256|512x512|384x384|128x128|96x96)["'][^>]*href=["']([^"']+)["'][^>]*>`,
+		`<link[^>]*href=["']([^"']+)["'][^>]*rel=["']icon["'][^>]*sizes=["'](?:192x192|256x256|512x512|384x384|128x128|96x96)["'][^>]*>`,
+		// Standard icons (any size)
+		`<link[^>]*rel=["'](?:icon|shortcut icon)["'][^>]*href=["']([^"']+)["'][^>]*>`,
+		`<link[^>]*href=["']([^"']+)["'][^>]*rel=["'](?:icon|shortcut icon)["'][^>]*>`,
 	}
 
+	var manifestURL string
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)
 		matches := re.FindAllStringSubmatch(html, -1)
 		for _, match := range matches {
 			if len(match) > 1 {
-				iconURL := match[1]
+				foundURL := match[1]
 				// Convert relative URLs to absolute
-				if strings.HasPrefix(iconURL, "//") {
-					iconURL = parsedURL.Scheme + ":" + iconURL
-				} else if strings.HasPrefix(iconURL, "/") {
-					iconURL = baseURL + iconURL
-				} else if !strings.HasPrefix(iconURL, "http") {
-					iconURL = baseURL + "/" + iconURL
+				if strings.HasPrefix(foundURL, "//") {
+					foundURL = parsedURL.Scheme + ":" + foundURL
+				} else if strings.HasPrefix(foundURL, "/") {
+					foundURL = baseURL + foundURL
+				} else if !strings.HasPrefix(foundURL, "http") {
+					foundURL = baseURL + "/" + foundURL
 				}
-				iconURLs = append(iconURLs, iconURL)
+
+				// Check if this is a manifest file
+				if strings.Contains(pattern, "manifest") {
+					if manifestURL == "" {
+						manifestURL = foundURL
+					}
+				} else {
+					iconURLs = append(iconURLs, foundURL)
+				}
 			}
 		}
+	}
+
+	// Parse manifest file for high-res icons
+	if manifestURL != "" {
+		manifestIcons := wm.findIconsFromManifest(manifestURL, client)
+		// Prepend manifest icons (they're usually higher quality)
+		iconURLs = append(manifestIcons, iconURLs...)
 	}
 
 	return iconURLs
 }
 
-func (wm *WebletManager) downloadIconFile(iconURL, host string, client *http.Client, iconDir string) (string, error) {
+// findIconsFromManifest parses a web app manifest and extracts icon URLs
+func (wm *WebletManager) findIconsFromManifest(manifestURL string, client *http.Client) []string {
+	var iconURLs []string
+
+	resp, err := client.Get(manifestURL)
+	if err != nil {
+		return iconURLs
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return iconURLs
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return iconURLs
+	}
+
+	// Parse manifest JSON
+	var manifest struct {
+		Icons []struct {
+			Src   string `json:"src"`
+			Sizes string `json:"sizes"`
+			Type  string `json:"type"`
+		} `json:"icons"`
+	}
+
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return iconURLs
+	}
+
+	// Parse base URL for relative paths
+	parsedURL, _ := url.Parse(manifestURL)
+	baseURL := fmt.Sprintf("%s://%s", parsedURL.Scheme, parsedURL.Host)
+
+	// Sort icons by size (prefer larger), and prefer PNG
+	type iconInfo struct {
+		url  string
+		size int
+	}
+	var icons []iconInfo
+
+	for _, icon := range manifest.Icons {
+		iconURL := icon.Src
+		// Convert relative URLs to absolute
+		if strings.HasPrefix(iconURL, "//") {
+			iconURL = parsedURL.Scheme + ":" + iconURL
+		} else if strings.HasPrefix(iconURL, "/") {
+			iconURL = baseURL + iconURL
+		} else if !strings.HasPrefix(iconURL, "http") {
+			// Handle relative path from manifest location
+			manifestDir := filepath.Dir(parsedURL.Path)
+			iconURL = baseURL + filepath.Join(manifestDir, iconURL)
+		}
+
+		// Parse size (e.g., "192x192" -> 192)
+		size := 0
+		if icon.Sizes != "" {
+			parts := strings.Split(icon.Sizes, "x")
+			if len(parts) > 0 {
+				fmt.Sscanf(parts[0], "%d", &size)
+			}
+		}
+
+		icons = append(icons, iconInfo{url: iconURL, size: size})
+	}
+
+	// Sort by size descending (larger first)
+	for i := 0; i < len(icons)-1; i++ {
+		for j := i + 1; j < len(icons); j++ {
+			if icons[j].size > icons[i].size {
+				icons[i], icons[j] = icons[j], icons[i]
+			}
+		}
+	}
+
+	for _, icon := range icons {
+		iconURLs = append(iconURLs, icon.url)
+	}
+
+	return iconURLs
+}
+
+func (wm *WebletManager) downloadIconFile(iconURL, webletName string, client *http.Client, iconDir string) (string, error) {
 	resp, err := client.Get(iconURL)
 	if err != nil {
 		return "", err
@@ -785,28 +927,95 @@ func (wm *WebletManager) downloadIconFile(iconURL, host string, client *http.Cli
 		return "", fmt.Errorf("failed to fetch: status %d", resp.StatusCode)
 	}
 
-	// Determine file extension from URL or content type
-	ext := ".ico"
-	if strings.Contains(strings.ToLower(iconURL), ".png") {
-		ext = ".png"
-	} else if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "png") {
-		ext = ".png"
+	// Read the response body
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
 	}
 
-	iconPath := filepath.Join(iconDir, host+ext)
+	// Validate minimum size (icons should be at least a few bytes)
+	if len(data) < 100 {
+		return "", fmt.Errorf("icon too small: %d bytes", len(data))
+	}
+
+	// Determine file extension from content type or URL
+	ext := ".ico"
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "png") || strings.Contains(strings.ToLower(iconURL), ".png") {
+		ext = ".png"
+	} else if strings.Contains(contentType, "svg") {
+		ext = ".svg"
+	} else if strings.Contains(contentType, "jpeg") || strings.Contains(contentType, "jpg") {
+		ext = ".jpg"
+	}
+
+	// For PNG images, validate dimensions to ensure it's a proper icon (roughly square)
+	// This helps avoid grabbing social media preview images which are rectangular
+	if ext == ".png" {
+		if !wm.isValidIconDimensions(data) {
+			return "", fmt.Errorf("image is not a valid icon (not square)")
+		}
+	}
+
+	// Use weblet name for the icon file (ensures unique icon per weblet)
+	iconPath := filepath.Join(iconDir, webletName+ext)
 	out, err := os.Create(iconPath)
 	if err != nil {
 		return "", err
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
+	_, err = out.Write(data)
 	if err != nil {
 		os.Remove(iconPath)
 		return "", err
 	}
 
 	return iconPath, nil
+}
+
+// isValidIconDimensions checks if PNG data represents a roughly square icon
+// Returns true for square or near-square images (aspect ratio between 0.8 and 1.25)
+func (wm *WebletManager) isValidIconDimensions(data []byte) bool {
+	// PNG header: 8 bytes signature, then IHDR chunk
+	// IHDR chunk: 4 bytes length, 4 bytes type ("IHDR"), 4 bytes width, 4 bytes height
+	if len(data) < 24 {
+		return false
+	}
+
+	// Check PNG signature
+	pngSig := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	for i := 0; i < 8; i++ {
+		if data[i] != pngSig[i] {
+			return true // Not a PNG, skip dimension check
+		}
+	}
+
+	// Check for IHDR chunk type at offset 12-15
+	if data[12] != 'I' || data[13] != 'H' || data[14] != 'D' || data[15] != 'R' {
+		return true // Invalid PNG structure, skip check
+	}
+
+	// Read width (big-endian) at offset 16-19
+	width := uint32(data[16])<<24 | uint32(data[17])<<16 | uint32(data[18])<<8 | uint32(data[19])
+	// Read height (big-endian) at offset 20-23
+	height := uint32(data[20])<<24 | uint32(data[21])<<16 | uint32(data[22])<<8 | uint32(data[23])
+
+	if width == 0 || height == 0 {
+		return false
+	}
+
+	// Calculate aspect ratio
+	var ratio float64
+	if width > height {
+		ratio = float64(width) / float64(height)
+	} else {
+		ratio = float64(height) / float64(width)
+	}
+
+	// Accept roughly square icons (aspect ratio up to 1.25)
+	// This allows for some padding but rejects 1200x630 social images (ratio ~1.9)
+	return ratio <= 1.25
 }
 
 func (wm *WebletManager) createDesktopFile(name, webletURL string) error {
@@ -832,8 +1041,9 @@ func (wm *WebletManager) createDesktopFile(name, webletURL string) error {
 	}
 
 	// Try to download favicon
-	iconPath, err := wm.downloadFavicon(webletURL)
+	iconPath, err := wm.downloadFavicon(webletURL, name)
 	if err != nil {
+		fmt.Printf("Warning: Could not download icon: %v\n", err)
 		// Use a default icon if favicon download fails
 		iconPath = "web-browser"
 	}
@@ -909,6 +1119,7 @@ func main() {
 		fmt.Println("  weblet <name> <url>     - Add and run weblet")
 		fmt.Println("  weblet add <name> <url> - Add weblet without running")
 		fmt.Println("  weblet remove <name>    - Remove weblet")
+		fmt.Println("  weblet refresh <name>   - Refresh icon and desktop file")
 		fmt.Println("  weblet native <name>    - Toggle native mode (lighter, no WebRTC)")
 		os.Exit(1)
 	}
@@ -959,6 +1170,18 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Removed weblet '%s'\n", name)
+
+	case "refresh":
+		if len(os.Args) != 3 {
+			fmt.Println("Usage: weblet refresh <name>")
+			fmt.Println("Re-downloads the icon and updates the desktop file")
+			os.Exit(1)
+		}
+		name := os.Args[2]
+		if err := wm.Refresh(name); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 
 	case "native":
 		if len(os.Args) != 3 {

@@ -262,7 +262,23 @@ func (wm *WebletManager) Run(name string) error {
 // runWithChrome runs the weblet using Chrome/Chromium in app mode
 // This is needed for WebRTC-heavy apps like Discord that need full audio device support
 func (wm *WebletManager) runWithChrome(weblet *Weblet) error {
-	// Check if Chrome window already exists by WM_CLASS or window title
+	// Create Chrome user data directory for this weblet
+	userDataDir := filepath.Join(wm.dataDir, "chrome-data", weblet.Name)
+	os.MkdirAll(userDataDir, 0755)
+
+	// Most reliable check: look for Chrome process with this weblet's user-data-dir
+	// This works on both X11 and Wayland
+	if wm.isChromeProcessRunning(userDataDir) {
+		fmt.Printf("Weblet '%s' is already running, focusing window...\n", weblet.Name)
+		// Try to focus the window using available methods
+		if err := wm.focusChromeWindowAnyMethod(weblet.Name, weblet.URL); err != nil {
+			// If focusing fails (e.g., on Wayland without proper tools), inform user
+			fmt.Printf("Note: Could not focus window automatically (%v). Please switch to it manually.\n", err)
+		}
+		return nil
+	}
+
+	// Fallback: Check if Chrome window exists by WM_CLASS or window title (X11 only)
 	if wm.isWebletWindowOpen(weblet.Name) {
 		return wm.focusWindowByTitle(weblet.Name)
 	}
@@ -286,15 +302,13 @@ func (wm *WebletManager) runWithChrome(weblet *Weblet) error {
 		return fmt.Errorf("Chrome or Chromium not found. Install with: sudo apt install google-chrome-stable")
 	}
 
-	// Create Chrome user data directory for this weblet
-	userDataDir := filepath.Join(wm.dataDir, "chrome-data", weblet.Name)
-	os.MkdirAll(userDataDir, 0755)
-
 	// Start Chrome in app mode
+	// Force X11 mode via XWayland so wmctrl can focus the window on Wayland
 	cmd := exec.Command(browser,
 		"--app="+weblet.URL,
 		"--user-data-dir="+userDataDir,
 		"--class=weblet-"+weblet.Name,
+		"--ozone-platform=x11",
 	)
 
 	// Redirect output to null
@@ -633,6 +647,113 @@ func (wm *WebletManager) focusWindowByID(windowID string) error {
 	}
 
 	return fmt.Errorf("failed to focus window: %w", lastErr)
+}
+
+// isChromeProcessRunning checks if a Chrome process is running with the given user-data-dir
+// This works on both X11 and Wayland by checking /proc
+func (wm *WebletManager) isChromeProcessRunning(userDataDir string) bool {
+	// Read all process directories in /proc
+	procDir, err := os.Open("/proc")
+	if err != nil {
+		return false
+	}
+	defer procDir.Close()
+
+	entries, err := procDir.Readdirnames(-1)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		// Check if entry is a PID (all digits)
+		isPid := true
+		for _, c := range entry {
+			if c < '0' || c > '9' {
+				isPid = false
+				break
+			}
+		}
+		if !isPid {
+			continue
+		}
+
+		// Read the cmdline for this process
+		cmdlinePath := filepath.Join("/proc", entry, "cmdline")
+		cmdline, err := os.ReadFile(cmdlinePath)
+		if err != nil {
+			continue
+		}
+
+		// cmdline is null-separated, check if it contains our user-data-dir
+		cmdlineStr := string(cmdline)
+		if strings.Contains(cmdlineStr, userDataDir) {
+			// Also verify it's a Chrome/Chromium process
+			if strings.Contains(cmdlineStr, "chrome") || strings.Contains(cmdlineStr, "chromium") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// focusChromeWindowAnyMethod tries multiple methods to focus a Chrome weblet window
+// This handles both X11 and Wayland environments
+func (wm *WebletManager) focusChromeWindowAnyMethod(name, webletURL string) error {
+	// First try the standard wmctrl/xdotool methods (works on X11)
+	if err := wm.focusChromeWindow(name, webletURL); err == nil {
+		return nil
+	}
+
+	// Try using gdbus to activate the window via GNOME Shell (works on Wayland with GNOME)
+	// Find windows matching our criteria
+	nameLower := strings.ToLower(name)
+	possibleTitles := []string{nameLower}
+
+	// Extract domain from URL for additional matching
+	if parsed, err := url.Parse(webletURL); err == nil {
+		host := strings.TrimPrefix(parsed.Host, "www.")
+		parts := strings.Split(host, ".")
+		if len(parts) >= 2 {
+			possibleTitles = append(possibleTitles, strings.ToLower(parts[len(parts)-2]))
+		}
+	}
+
+	// Try using gdbus to call GNOME Shell's window activation
+	// This uses the org.gnome.Shell.Extensions.Windows interface if available
+	gdbusCmd := exec.Command("gdbus", "call", "--session",
+		"--dest", "org.gnome.Shell",
+		"--object-path", "/org/gnome/Shell",
+		"--method", "org.gnome.Shell.Eval",
+		fmt.Sprintf(`
+			const start = Date.now();
+			const targets = %q.split(',');
+			let found = false;
+			global.get_window_actors().forEach(actor => {
+				const win = actor.get_meta_window();
+				const title = (win.get_title() || '').toLowerCase();
+				for (const target of targets) {
+					if (title.includes(target.trim())) {
+						win.activate(start);
+						found = true;
+						return;
+					}
+				}
+			});
+			found;
+		`, strings.Join(possibleTitles, ",")))
+
+	if output, err := gdbusCmd.Output(); err == nil {
+		// gdbus returns something like "(true, 'true')" or "(true, 'false')"
+		// The first bool is success of eval, the second (in quotes) is our result
+		outputStr := string(output)
+		if strings.Contains(outputStr, "'true'") {
+			fmt.Printf("Successfully focused window using GNOME Shell\n")
+			return nil
+		}
+	}
+
+	return fmt.Errorf("could not focus window using any available method")
 }
 
 func splitLines(s string) []string {

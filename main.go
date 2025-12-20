@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/michalCapo/weblet/view"
 )
 
 // version is set at build time using ldflags
@@ -193,7 +195,7 @@ func (wm *WebletManager) Run(name string) error {
 		}
 
 		// Run the webview
-		runWebview(weblet.URL, name)
+		view.RunWebview(weblet.URL, name)
 		return nil
 	}
 
@@ -260,9 +262,15 @@ func (wm *WebletManager) Run(name string) error {
 // runWithChrome runs the weblet using Chrome/Chromium in app mode
 // This is needed for WebRTC-heavy apps like Discord that need full audio device support
 func (wm *WebletManager) runWithChrome(weblet *Weblet) error {
-	// Check if Chrome window already exists
+	// Check if Chrome window already exists by WM_CLASS or window title
 	if wm.isWebletWindowOpen(weblet.Name) {
 		return wm.focusWindowByTitle(weblet.Name)
+	}
+
+	// Additional check: look for Chrome windows with the weblet's URL in the title
+	// Chrome app windows typically show the page title
+	if wm.isChromeWebletWindowOpen(weblet.Name, weblet.URL) {
+		return wm.focusChromeWindow(weblet.Name, weblet.URL)
 	}
 
 	// Find Chrome or Chromium
@@ -433,6 +441,93 @@ func (wm *WebletManager) isWebletWindowOpen(name string) bool {
 	}
 
 	return false
+}
+
+// isChromeWebletWindowOpen checks if a Chrome app window for this weblet is open
+// Chrome app mode windows may not use the WM_CLASS we set, so we also check by window title
+func (wm *WebletManager) isChromeWebletWindowOpen(name, webletURL string) bool {
+	cmd := exec.Command("wmctrl", "-l")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	lines := splitLines(string(output))
+	nameLower := strings.ToLower(name)
+
+	// Known mappings of weblet names to possible window titles
+	// e.g., "discord" weblet might have a window titled "Discord"
+	possibleTitles := []string{nameLower}
+
+	// Extract domain from URL for additional matching
+	if parsed, err := url.Parse(webletURL); err == nil {
+		host := strings.TrimPrefix(parsed.Host, "www.")
+		// For app.discord.com -> "discord"
+		parts := strings.Split(host, ".")
+		if len(parts) >= 2 {
+			possibleTitles = append(possibleTitles, strings.ToLower(parts[len(parts)-2]))
+		}
+	}
+
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 4 {
+			windowTitle := strings.Join(parts[3:], " ")
+			windowTitleLower := strings.ToLower(windowTitle)
+
+			for _, title := range possibleTitles {
+				// Check various patterns Chrome might use
+				if strings.Contains(windowTitleLower, title) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// focusChromeWindow finds and focuses a Chrome app window for the weblet
+func (wm *WebletManager) focusChromeWindow(name, webletURL string) error {
+	fmt.Printf("Focusing existing Chrome window: %s\n", name)
+
+	cmd := exec.Command("wmctrl", "-l")
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to list windows: %w", err)
+	}
+
+	lines := splitLines(string(output))
+	nameLower := strings.ToLower(name)
+
+	// Known mappings of weblet names to possible window titles
+	possibleTitles := []string{nameLower}
+
+	// Extract domain from URL for additional matching
+	if parsed, err := url.Parse(webletURL); err == nil {
+		host := strings.TrimPrefix(parsed.Host, "www.")
+		parts := strings.Split(host, ".")
+		if len(parts) >= 2 {
+			possibleTitles = append(possibleTitles, strings.ToLower(parts[len(parts)-2]))
+		}
+	}
+
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 4 {
+			windowTitle := strings.Join(parts[3:], " ")
+			windowTitleLower := strings.ToLower(windowTitle)
+
+			for _, title := range possibleTitles {
+				if strings.Contains(windowTitleLower, title) {
+					windowID := parts[0]
+					return wm.focusWindowByID(windowID)
+				}
+			}
+		}
+	}
+
+	return fmt.Errorf("no Chrome window found for: %s", name)
 }
 
 func (wm *WebletManager) focusWindowByTitle(title string) error {

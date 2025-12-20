@@ -13,25 +13,26 @@ check_dependencies() {
         exit 1
     fi
     
-    # Check for webkit2gtk (required for webview)
-    if ! pkg-config --exists webkit2gtk-4.0 2>/dev/null && ! pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
-        echo "Error: webkit2gtk is not installed"
-        echo "Install with: sudo apt install libwebkit2gtk-4.0-dev"
-        exit 1
+    # Check for webkit2gtk (optional for webview)
+    HAS_WEBKIT=false
+    if pkg-config --exists webkit2gtk-4.0 2>/dev/null || pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+        HAS_WEBKIT=true
+        echo "✓ WebKit dependencies found (Native mode enabled)"
+    else
+        echo "⚠️  WebKit dependencies not found (Native mode will be disabled)"
+        if [ -f /etc/fedora-release ]; then
+            echo "   To enable native mode on Fedora, run: sudo dnf install webkit2gtk4.1-devel"
+        elif [ -f /etc/debian_version ]; then
+            echo "   To enable native mode on Debian/Ubuntu, run: sudo apt install libwebkit2gtk-4.0-dev"
+        fi
     fi
     
-    echo "✓ All dependencies found"
+    echo "✓ Build environment ready"
 }
 
-# Generate simplified version: <days_since_epoch>.<HHMM>
-# Date: Days since Jan 1, 2024 (3-4 digits)
-# Time: HHMM format (4 digits)
+# Generate version: YYYYMMDD.HHMM format
 generate_version() {
-    EPOCH_DATE="2024-01-01"
-    CURRENT_DATE=$(date +%Y-%m-%d)
-    DAYS_SINCE_EPOCH=$(( ( $(date -d "$CURRENT_DATE" +%s) - $(date -d "$EPOCH_DATE" +%s) ) / 86400 ))
-    TIME_HHMM=$(date +%H%M)
-    VERSION="${DAYS_SINCE_EPOCH}.${TIME_HHMM}"
+    VERSION=$(date +%Y%m%d.%H%M)
     echo "$VERSION"
 }
 
@@ -41,10 +42,32 @@ build() {
     
     echo "Building weblet version $VERSION..."
     
-    # CGO is required for webview
-    CGO_ENABLED=1 go build -ldflags "-X main.version=$VERSION" -o weblet
+    BUILD_TAGS=""
+    if [ "$HAS_WEBKIT" = false ]; then
+        BUILD_TAGS="-tags no_native"
+    fi
+
+    # CGO is required for webview if we have webkit
+    if [ "$HAS_WEBKIT" = true ]; then
+        export CGO_ENABLED=1
+    else
+        export CGO_ENABLED=0
+    fi
+    
+    set +e
+    go build $BUILD_TAGS -ldflags "-X main.version=$VERSION" -o weblet .
+    BUILD_EXIT_CODE=$?
+    set -e
+    
+    if [ $BUILD_EXIT_CODE -ne 0 ]; then
+        echo "Error: Build failed with exit code $BUILD_EXIT_CODE"
+        exit $BUILD_EXIT_CODE
+    fi
     
     echo "✓ Built weblet with version: $VERSION"
+    if [ "$HAS_WEBKIT" = false ]; then
+        echo "  Note: Built with 'no_native' tag (no native webview support)"
+    fi
 }
 
 # Install to system PATH

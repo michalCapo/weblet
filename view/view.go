@@ -1,4 +1,6 @@
-package main
+//go:build !no_native
+
+package view
 
 /*
 #cgo linux pkg-config: gtk+-3.0 webkit2gtk-4.1 gdk-3.0 gdk-x11-3.0 x11
@@ -174,6 +176,8 @@ void weblet_init(const char *title, const char *url, const char *data_dir, const
 
 void weblet_run() {
     if (app_running) {
+        // Add timer to check for focus requests from IPC (every 100ms)
+        g_timeout_add(100, on_focus_check, NULL);
         gtk_main();
     }
 }
@@ -183,12 +187,34 @@ void weblet_quit() {
         gtk_widget_destroy(main_window);
     }
 }
+
+void weblet_focus() {
+    if (app_running && main_window != NULL) {
+        gtk_window_present(GTK_WINDOW(main_window));
+    }
+}
+
+// Process pending GTK events from non-main thread safely
+static int focus_requested = 0;
+
+gboolean on_focus_check(gpointer data) {
+    if (focus_requested) {
+        focus_requested = 0;
+        weblet_focus();
+    }
+    return TRUE; // Keep timer running
+}
+
+void weblet_request_focus() {
+    focus_requested = 1;
+}
 */
 import "C"
 
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
@@ -197,10 +223,54 @@ import (
 	"unsafe"
 )
 
+// tryFocusExistingWindow attempts to connect to an existing weblet instance
+// Returns true if focus request was sent successfully, false if no instance exists
+func tryFocusExistingWindow(socketPath string) bool {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+
+	// Send focus command
+	conn.Write([]byte("focus"))
+	return true
+}
+
+// startFocusListener starts a Unix socket listener for focus requests
+func startFocusListener(socketPath string) (net.Listener, error) {
+	// Remove stale socket if exists
+	os.Remove(socketPath)
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return // Listener closed
+			}
+
+			buf := make([]byte, 16)
+			n, _ := conn.Read(buf)
+			if n > 0 && string(buf[:n]) == "focus" {
+				log.Println("Received focus request from another instance")
+				C.weblet_request_focus()
+			}
+			conn.Close()
+		}
+	}()
+
+	return listener, nil
+}
+
 // runWebview opens a webview window with the given URL and title
 // Uses persistent storage for cookies, localStorage, and other web data
 // This function blocks until the window is closed
-func runWebview(webletURL, title string) {
+func RunWebview(webletURL, title string) {
 	// Get data directory for this weblet
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -212,6 +282,17 @@ func runWebview(webletURL, title string) {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
+	// Socket path for single-instance communication
+	sockDir := filepath.Join(homeDir, ".weblet", "sockets")
+	os.MkdirAll(sockDir, 0755)
+	socketPath := filepath.Join(sockDir, title+".sock")
+
+	// Try to focus existing instance first
+	if tryFocusExistingWindow(socketPath) {
+		log.Printf("Focused existing weblet window: %s", title)
+		return
+	}
+
 	// Find icon for this weblet
 	iconPath := findWebletIcon(homeDir, webletURL)
 
@@ -221,6 +302,17 @@ func runWebview(webletURL, title string) {
 
 	log.Printf("Opened weblet window: %s (%s)", title, webletURL)
 	log.Printf("Data directory: %s", dataDir)
+
+	// Start socket listener for focus requests
+	listener, err := startFocusListener(socketPath)
+	if err != nil {
+		log.Printf("Warning: Failed to start focus listener: %v", err)
+	} else {
+		defer func() {
+			listener.Close()
+			os.Remove(socketPath)
+		}()
+	}
 
 	// Convert strings to C strings
 	cTitle := C.CString(title)
